@@ -5,6 +5,7 @@ import {
   useState,
   type ChangeEvent,
   type Dispatch,
+  type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
   type RefObject,
   type SetStateAction,
@@ -52,10 +53,27 @@ const INSET_SPAN_MIN = 0.2
 const INSET_SPAN_MAX = 15
 /** A drag ending closer than this to the click that follows still counts as a click. */
 const INSET_DRAG_SLOP_MS = 350
-const INSET_SIZE_MIN = 140
+const INSET_SIZE_MIN = 120
 const INSET_SIZE_MAX = 1200
 const INSET_MARGIN = 8
 const INSET_BOX_KEY = 'tunnel-inset-box-v1'
+const COMPACT_MQ = '(max-width: 840px)'
+
+function mediaMatches(query: string): boolean {
+  return window.matchMedia(query).matches
+}
+
+function useMediaQuery(query: string): boolean {
+  const [matches, setMatches] = useState(() => mediaMatches(query))
+  useEffect(() => {
+    const mql = window.matchMedia(query)
+    const onChange = () => setMatches(mql.matches)
+    onChange()
+    mql.addEventListener('change', onChange)
+    return () => mql.removeEventListener('change', onChange)
+  }, [query])
+  return matches
+}
 
 /** null x/y keeps the CSS default corner until the box is dragged for the first time. */
 interface InsetBoxState {
@@ -65,7 +83,7 @@ interface InsetBoxState {
 }
 
 function defaultInsetSize(): number {
-  return window.innerWidth < 900 ? 156 : 200
+  return mediaMatches(COMPACT_MQ) ? 132 : 200
 }
 
 function clampBoxToStage(
@@ -128,6 +146,55 @@ const EXPORT_OPTIONS: { id: ExportKind; label: string }[] = [
   { id: 'stack', label: '轮廓叠置' },
 ]
 
+const EXPORT_GROUPS: { title: string; hint: string; ids: ExportKind[] }[] = [
+  { title: '当前这一刀', hint: '跟实时缩略图同一桩号', ids: ['section2d', 'section3d', 'overbreak'] },
+  { title: '沿区间', hint: '底部两端游标圈出的一段', ids: ['tunnel3d', 'gallery', 'stack', 'areaDepth', 'volumeDepth'] },
+  { title: '算法', hint: '', ids: ['compare'] },
+]
+
+type RailDeck = 'slice' | 'design' | 'export' | 'look'
+
+const RAIL_DECKS: { id: RailDeck; idx: string; label: string }[] = [
+  { id: 'slice', idx: '01', label: '切片' },
+  { id: 'design', idx: '02', label: '设计' },
+  { id: 'export', idx: '03', label: '出图' },
+  { id: 'look', idx: '04', label: '外观' },
+]
+
+const RAIL_DECK_KEY = 'tunnel-rail-deck-v1'
+
+function loadDeck(): RailDeck {
+  try {
+    const raw = localStorage.getItem(RAIL_DECK_KEY)
+    if (raw === 'slice' || raw === 'design' || raw === 'export' || raw === 'look') return raw
+  } catch {
+    /* ignore */
+  }
+  return 'slice'
+}
+
+function saveDeck(deck: RailDeck): void {
+  localStorage.setItem(RAIL_DECK_KEY, deck)
+}
+
+function onDeckKey(
+  event: ReactKeyboardEvent<HTMLButtonElement>,
+  index: number,
+  pick: (id: RailDeck) => void,
+): void {
+  const dir =
+    event.key === 'ArrowRight' || event.key === 'ArrowDown'
+      ? 1
+      : event.key === 'ArrowLeft' || event.key === 'ArrowUp'
+        ? -1
+        : 0
+  if (!dir) return
+  event.preventDefault()
+  const next = RAIL_DECKS[(index + dir + RAIL_DECKS.length) % RAIL_DECKS.length]
+  pick(next.id)
+  document.getElementById(`deck-tab-${next.id}`)?.focus()
+}
+
 interface HudState {
   s: number
   pointCount: number
@@ -161,6 +228,21 @@ function oddWindow(value: number): number {
 
 function formatMeters(value: number, digits = 2): string {
   return `${value.toFixed(digits)} m`
+}
+
+function zipFileName(source: string | null, stamp: string): string {
+  const stem = (source ?? 'tunnel').replace(/\.[^.]+$/u, '').replace(/[^\w.-]+/gu, '_') || 'tunnel'
+  return `${stem}-figures-${stamp}.zip`
+}
+
+function triggerDownload(url: string, name: string): void {
+  const link = document.createElement('a')
+  link.href = url
+  link.download = name
+  link.rel = 'noopener'
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
 }
 
 function defaultStation(meta: Meta): number {
@@ -494,6 +576,7 @@ export function App() {
   const [exportHint, setExportHint] = useState<string | null>(null)
   const [exportError, setExportError] = useState<string | null>(null)
   const [exportUrls, setExportUrls] = useState<Partial<Record<ExportKind, string>> | null>(null)
+  const [exportZip, setExportZip] = useState<{ url: string; name: string } | null>(null)
   const [insetOpen, setInsetOpen] = useState(false)
   const [preview, setPreview] = useState<{ url: string; label: string } | null>(null)
   const insetViewRef = useRef<InsetViewBox | null>(null)
@@ -504,6 +587,7 @@ export function App() {
   const [box, setBox] = useState<InsetBoxState>(loadInsetBox)
   const [boxDragging, setBoxDragging] = useState(false)
   const [liveExporting, setLiveExporting] = useState(false)
+  const compactStage = useMediaQuery(COMPACT_MQ)
   // Mirrored so the drag listeners stay attached across renders without going stale.
   const boxStateRef = useRef(box)
   boxStateRef.current = box
@@ -884,8 +968,10 @@ export function App() {
 
   useEffect(() => {
     if (!insetOpen) return
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null
     const id = window.requestAnimationFrame(() => {
       redrawInsets(lastFrameRef.current, lookRef.current)
+      document.getElementById('inset-dialog')?.focus()
     })
     const onKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
@@ -897,6 +983,7 @@ export function App() {
     return () => {
       window.cancelAnimationFrame(id)
       window.removeEventListener('keydown', onKey)
+      previous?.focus()
     }
   }, [insetOpen])
 
@@ -928,23 +1015,33 @@ export function App() {
     saveInsetBox(box)
   }, [box])
 
+  useEffect(() => {
+    setBox((prev) => {
+      if (prev.x !== null) return prev
+      const size = compactStage ? 132 : 200
+      return prev.size === size ? prev : { ...prev, size }
+    })
+  }, [compactStage])
+
   // The canvas CSS size changed, so its bitmap has to be re-rendered at the new scale.
   useEffect(() => {
     redrawInsets(lastFrameRef.current, lookRef.current)
   }, [box.size])
 
   useEffect(() => {
+    const stage = stageRef.current
+    if (!stage) return
     const fitToStage = () => {
-      const stage = stageRef.current?.getBoundingClientRect()
+      const stageRect = stageRef.current?.getBoundingClientRect()
       const rect = insetBoxRef.current?.getBoundingClientRect()
-      if (!stage || !rect) return
+      if (!stageRect || !rect) return
       setBox((prev) => {
         const bar = Math.max(0, rect.height - prev.size)
         const size = Math.min(
           prev.size,
           Math.max(
             INSET_SIZE_MIN,
-            Math.min(stage.width - INSET_MARGIN * 2, stage.height - INSET_MARGIN * 2 - bar),
+            Math.min(stageRect.width - INSET_MARGIN * 2, stageRect.height - INSET_MARGIN * 2 - bar),
           ),
         )
         if (prev.x === null || prev.y === null) {
@@ -955,20 +1052,23 @@ export function App() {
           prev.y,
           size,
           size + bar,
-          stage.width,
-          stage.height,
+          stageRect.width,
+          stageRect.height,
         )
         if (size === prev.size && next.x === prev.x && next.y === prev.y) return prev
         return { ...prev, size, ...next }
       })
     }
     fitToStage()
-    window.addEventListener('resize', fitToStage)
-    return () => window.removeEventListener('resize', fitToStage)
+    const observer = new ResizeObserver(fitToStage)
+    observer.observe(stage)
+    return () => observer.disconnect()
   }, [])
 
   useEffect(() => {
     if (!preview) return
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    document.getElementById('export-dialog')?.focus()
     const onKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         event.preventDefault()
@@ -976,7 +1076,10 @@ export function App() {
       }
     }
     window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      previous?.focus()
+    }
   }, [preview])
 
   useEffect(() => {
@@ -1178,6 +1281,12 @@ export function App() {
         if (prev) for (const url of Object.values(prev)) URL.revokeObjectURL(url)
         return result.urls
       })
+      const zipName = zipFileName(meta?.source_name ?? health.source_name ?? null, result.stamp)
+      setExportZip((prev) => {
+        if (prev) URL.revokeObjectURL(prev.url)
+        return result.zipUrl ? { url: result.zipUrl, name: zipName } : null
+      })
+      if (result.zipUrl) triggerDownload(result.zipUrl, zipName)
       setPreview(null)
     } catch (err: unknown) {
       setExportError(err instanceof Error ? err.message : '导出失败')
@@ -1200,6 +1309,9 @@ export function App() {
 
   return (
     <div className="shell">
+      <a className="skip" href="#stage">
+        跳到剖面
+      </a>
       <input
         id="las-file"
         ref={fileInputRef}
@@ -1226,6 +1338,7 @@ export function App() {
         exportHint={exportHint}
         exportError={exportError}
         exportUrls={exportUrls}
+        exportZip={exportZip}
         thickSliderRef={thickSliderRef}
         thickLiveRef={thickLiveRef}
         onThickInput={onThickInput}
@@ -1248,10 +1361,10 @@ export function App() {
         onPreview={(item) => setPreview(item)}
         onOpenPicker={() => fileInputRef.current?.click()}
       />
-      <main className="stage" ref={stageRef}>
+      <main id="stage" className="stage" ref={stageRef}>
         <canvas ref={canvasRef} className="gl" />
-        <ViewportHud hud={hud} />
-        <div className="stage-tr">
+        <div className="stage-tl">
+          <ViewportHud hud={hud} />
           <button type="button" className="home" onClick={() => viewerRef.current?.resetCamera()}>
             归位
           </button>
@@ -1328,12 +1441,17 @@ export function App() {
         ) : null}
         {insetOpen && overlays.inset ? (
           <div
+            id="inset-dialog"
             className="inset-lightbox"
             onClick={() => setInsetOpen(false)}
             role="dialog"
             aria-modal="true"
             aria-label="断面图"
+            tabIndex={-1}
           >
+            <button type="button" className="lightbox-close" onClick={() => setInsetOpen(false)}>
+              关闭
+            </button>
             <canvas
               ref={insetLargeRef}
               className="inset inset-large"
@@ -1351,12 +1469,17 @@ export function App() {
         ) : null}
         {preview ? (
           <div
+            id="export-dialog"
             className="inset-lightbox export-lightbox"
             onClick={() => setPreview(null)}
             role="dialog"
             aria-modal="true"
             aria-label={preview.label}
+            tabIndex={-1}
           >
+            <button type="button" className="lightbox-close" onClick={() => setPreview(null)}>
+              关闭
+            </button>
             <img
               className="export-large"
               src={preview.url}
@@ -1419,6 +1542,7 @@ function InstrumentRail(props: {
   exportHint: string | null
   exportError: string | null
   exportUrls: Partial<Record<ExportKind, string>> | null
+  exportZip: { url: string; name: string } | null
   thickSliderRef: RefObject<HTMLInputElement | null>
   thickLiveRef: RefObject<HTMLSpanElement | null>
   onThickInput: (event: ChangeEvent<HTMLInputElement>) => void
@@ -1438,186 +1562,261 @@ function InstrumentRail(props: {
   onOpenPicker: () => void
 }) {
   const methods = props.meta?.methods ?? ['hampel']
+  const [deck, setDeck] = useState<RailDeck>(loadDeck)
+  const pickDeck = (id: RailDeck) => {
+    setDeck(id)
+    saveDeck(id)
+  }
+  const hasFigures = Boolean(
+    (props.exportUrls && Object.values(props.exportUrls).some(Boolean)) || props.exportZip,
+  )
+
   return (
     <aside className="rail">
       <header className="rail-head">
-        <p className="mark">巷道内壁</p>
-        <h1>沿桩号切开隧道，检查内轮廓。</h1>
-        {props.meta ? (
-          <p className="census">
-            {props.sourceName ? `${props.sourceName} · ` : ''}
-            全云 {props.meta.point_count.toLocaleString()} 点，屏幕上画 {props.meta.viz_count.toLocaleString()} 点
-          </p>
-        ) : (
-          <p className="census">等待点云铺进视野</p>
-        )}
-      </header>
-
-      <section className="block">
-        <p className="block-title">点云卷</p>
-        <p className="docket-name">{props.sourceName ?? '还没有装入'}</p>
+        <h1 className="mark">巷道内壁</h1>
+        <p className="docket-name" title={props.sourceName ?? undefined}>
+          {props.sourceName ?? '还没有装入'}
+        </p>
         <button
           type="button"
           className={`file-btn${props.uploading ? ' is-wait' : ''}`}
           disabled={props.uploading}
           onClick={props.onOpenPicker}
         >
-          {props.uploading ? '正在读入…' : props.sourceName ? '换一卷 LAS' : '打开 LAS'}
+          {props.uploading ? '正在读入…' : props.sourceName ? '换卷' : '打开 LAS'}
         </button>
-        <p className="hint">文件只在这台电脑的浏览器里解码，不会传到网上。换卷后按新文件估计轴线。</p>
-      </section>
+        <p className="census">
+          {props.meta
+            ? `${props.meta.point_count.toLocaleString()} 点 · 屏 ${props.meta.viz_count.toLocaleString()}`
+            : '等待点云'}
+        </p>
+      </header>
 
-      <section className="block">
-        <p className="block-title">主题</p>
-        <div className="theme-pair">
+      <nav className="deck-tabs" role="tablist" aria-label="边栏分页">
+        {RAIL_DECKS.map((item, index) => (
           <button
+            key={item.id}
             type="button"
-            className={props.look.theme === 'dark' ? 'is-on' : ''}
-            onClick={() => props.onTheme('dark')}
+            role="tab"
+            id={`deck-tab-${item.id}`}
+            aria-selected={deck === item.id}
+            aria-controls={`deck-panel-${item.id}`}
+            tabIndex={deck === item.id ? 0 : -1}
+            className={`deck-tab${deck === item.id ? ' is-on' : ''}${
+              item.id === 'export' && hasFigures ? ' has-mark' : ''
+            }`}
+            onClick={() => pickDeck(item.id)}
+            onKeyDown={(event) => onDeckKey(event, index, pickDeck)}
           >
-            暗色
+            <span className="deck-idx">{item.idx}</span>
+            {item.label}
           </button>
-          <button
-            type="button"
-            className={props.look.theme === 'light' ? 'is-on' : ''}
-            onClick={() => props.onTheme('light')}
-          >
-            亮色
-          </button>
-        </div>
-      </section>
+        ))}
+      </nav>
 
-      <section className="block">
-        <div className="block-head">
-          <label htmlFor="thickness">切片厚度</label>
-          <span ref={props.thickLiveRef} className="readout">
-            {formatMeters(DEFAULT_THICKNESS)}
-          </span>
-        </div>
-        <input
-          id="thickness"
-          ref={props.thickSliderRef}
-          className="slider"
-          type="range"
-          min={THICK_MIN}
-          max={THICK_MAX}
-          step={0.01}
-          defaultValue={DEFAULT_THICKNESS}
-          onChange={props.onThickInput}
-        />
-        <p className="hint">0.05–1.0 m。拖动时切面带和轮廓一起即时更新。</p>
-      </section>
-
-      <section className="block">
-        <label htmlFor="method">轮廓算法</label>
-        <select id="method" value={props.method} onChange={props.onMethod}>
-          {methods.map((name) => (
-            <option key={name} value={name}>
-              {name} {METHOD_HINT[name] ?? ''}
-            </option>
-          ))}
-        </select>
-      </section>
-
-      <details className="block advanced">
-        <summary>高级</summary>
-        <label htmlFor="bins">
-          分桶
-          <input
-            id="bins"
-            type="number"
-            min={12}
-            max={720}
-            step={1}
-            value={props.bins}
-            onChange={props.onBins}
-          />
-        </label>
-        <label htmlFor="smooth">
-          平滑窗（奇数）
-          <input
-            id="smooth"
-            type="number"
-            min={5}
-            max={51}
-            step={2}
-            value={props.smooth}
-            onChange={props.onSmooth}
-          />
-        </label>
-      </details>
-
-      <section className="block">
-        <p className="block-title">叠显</p>
-        <OverlayToggles look={props.look} overlays={props.overlays} onChange={props.onOverlays} />
-      </section>
-
-      <HorseshoePanel
-        params={props.horseshoe}
-        disabled={!props.meta}
-        onChange={props.onHorseshoe}
-        onAlign={props.onAlignHorseshoe}
-      />
-
-      <details className="block advanced">
-        <summary>颜色</summary>
-        <div className="tints">
-          {(
-            [
-              ['cloud', '点云灰'],
-              ['slice', '切片点'],
-              ['contour', '轮廓线'],
-              ['fit', '拟合圆'],
-              ['design', '设计马蹄'],
-            ] as const
-          ).map(([key, label]) => (
-            <label key={key} className="tint" htmlFor={`tint-${key}`}>
-              {label}
+      <div className="deck">
+        <div
+          className="deck-panel"
+          role="tabpanel"
+          id="deck-panel-slice"
+          aria-labelledby="deck-tab-slice"
+          hidden={deck !== 'slice'}
+        >
+            <section className="block">
+              <div className="block-head">
+                <label htmlFor="thickness">切片厚度</label>
+                <span ref={props.thickLiveRef} className="readout">
+                  {formatMeters(DEFAULT_THICKNESS)}
+                </span>
+              </div>
               <input
-                id={`tint-${key}`}
-                type="color"
-                value={props.look[key]}
-                onChange={(event) => props.onTint(key, event.target.value)}
+                id="thickness"
+                ref={props.thickSliderRef}
+                className="slider"
+                type="range"
+                min={THICK_MIN}
+                max={THICK_MAX}
+                step={0.01}
+                defaultValue={DEFAULT_THICKNESS}
+                onChange={props.onThickInput}
               />
-            </label>
-          ))}
+            </section>
+            <section className="block">
+              <label htmlFor="method">轮廓算法</label>
+              <select id="method" value={props.method} onChange={props.onMethod}>
+                {methods.map((name) => (
+                  <option key={name} value={name}>
+                    {name} {METHOD_HINT[name] ?? ''}
+                  </option>
+                ))}
+              </select>
+              <div className="pair-fields">
+                <label htmlFor="bins">
+                  分桶
+                  <input
+                    id="bins"
+                    type="number"
+                    inputMode="numeric"
+                    min={12}
+                    max={720}
+                    step={1}
+                    value={props.bins}
+                    onChange={props.onBins}
+                  />
+                </label>
+                <label htmlFor="smooth">
+                  平滑
+                  <input
+                    id="smooth"
+                    type="number"
+                    inputMode="numeric"
+                    min={5}
+                    max={51}
+                    step={2}
+                    value={props.smooth}
+                    onChange={props.onSmooth}
+                  />
+                </label>
+              </div>
+            </section>
+            <section className="block">
+              <p className="block-title">叠显</p>
+              <OverlayToggles look={props.look} overlays={props.overlays} onChange={props.onOverlays} />
+            </section>
         </div>
-        <label className="tint" htmlFor="cloud-bright">
-          点云明暗
-          <span className="readout">{Math.round(props.look.brightness * 100)}%</span>
-        </label>
-        <input
-          id="cloud-bright"
-          className="slider"
-          type="range"
-          min={0.28}
-          max={1}
-          step={0.02}
-          value={props.look.brightness}
-          onChange={(event) => props.onBrightness(Number(event.target.value))}
-        />
-        <button type="button" className="reset-look" onClick={props.onResetLook}>
-          恢复当前主题默认色
-        </button>
-      </details>
 
-      <ExportPanel
-        kinds={props.kinds}
-        exporting={props.exporting}
-        exportHint={props.exportHint}
-        disabled={props.uploading || !props.meta}
-        exportError={props.exportError}
-        exportUrls={props.exportUrls}
-        onKinds={props.onKinds}
-        onExport={props.onExport}
-        onPreview={props.onPreview}
-      />
+        <div
+          className="deck-panel"
+          role="tabpanel"
+          id="deck-panel-design"
+          aria-labelledby="deck-tab-design"
+          hidden={deck !== 'design'}
+        >
+          <HorseshoePanel
+            params={props.horseshoe}
+            tint={props.look.design}
+            disabled={!props.meta}
+            onChange={props.onHorseshoe}
+            onAlign={props.onAlignHorseshoe}
+          />
+        </div>
+
+        <div
+          className="deck-panel"
+          role="tabpanel"
+          id="deck-panel-export"
+          aria-labelledby="deck-tab-export"
+          hidden={deck !== 'export'}
+        >
+          <ExportPanel
+            kinds={props.kinds}
+            exporting={props.exporting}
+            exportHint={props.exportHint}
+            disabled={props.uploading || !props.meta}
+            exportError={props.exportError}
+            exportUrls={props.exportUrls}
+            exportZip={props.exportZip}
+            onKinds={props.onKinds}
+            onExport={props.onExport}
+            onPreview={props.onPreview}
+          />
+        </div>
+
+        <div
+          className="deck-panel"
+          role="tabpanel"
+          id="deck-panel-look"
+          aria-labelledby="deck-tab-look"
+          hidden={deck !== 'look'}
+        >
+            <section className="block">
+              <p className="block-title">主题</p>
+              <div className="theme-pair">
+                <button
+                  type="button"
+                  className={props.look.theme === 'dark' ? 'is-on' : ''}
+                  onClick={() => props.onTheme('dark')}
+                >
+                  暗色
+                </button>
+                <button
+                  type="button"
+                  className={props.look.theme === 'light' ? 'is-on' : ''}
+                  onClick={() => props.onTheme('light')}
+                >
+                  亮色
+                </button>
+              </div>
+            </section>
+            <section className="block">
+              <p className="block-title">颜色</p>
+              <div className="tints">
+                {(
+                  [
+                    ['cloud', '点云灰'],
+                    ['slice', '切片点'],
+                    ['contour', '轮廓线'],
+                    ['fit', '拟合圆'],
+                    ['design', '设计马蹄'],
+                  ] as const
+                ).map(([key, label]) => (
+                  <label key={key} className="tint" htmlFor={`tint-${key}`}>
+                    {label}
+                    <input
+                      id={`tint-${key}`}
+                      type="color"
+                      value={props.look[key]}
+                      onChange={(event) => props.onTint(key, event.target.value)}
+                    />
+                  </label>
+                ))}
+              </div>
+              <label className="tint" htmlFor="cloud-bright">
+                点云明暗
+                <span className="readout">{Math.round(props.look.brightness * 100)}%</span>
+              </label>
+              <input
+                id="cloud-bright"
+                className="slider"
+                type="range"
+                min={0.28}
+                max={1}
+                step={0.02}
+                value={props.look.brightness}
+                onChange={(event) => props.onBrightness(Number(event.target.value))}
+              />
+              <button type="button" className="reset-look" onClick={props.onResetLook}>
+                恢复当前主题默认色
+              </button>
+            </section>
+        </div>
+      </div>
     </aside>
   )
 }
 
+function horseshoePath(params: HorseshoeParams): { d: string; viewBox: string } {
+  const pts = horseshoePolyline(params, 48)
+  const us = pts.map((p) => p[0])
+  const vs = pts.map((p) => p[1])
+  const minU = Math.min(...us)
+  const maxU = Math.max(...us)
+  const minV = Math.min(...vs)
+  const maxV = Math.max(...vs)
+  const pad = Math.max(maxU - minU, maxV - minV, 0.4) * 0.12
+  const d = pts
+    .map((p, i) => `${i === 0 ? 'M' : 'L'}${p[0].toFixed(3)} ${(-p[1]).toFixed(3)}`)
+    .join(' ')
+  return {
+    d,
+    viewBox: `${(minU - pad).toFixed(3)} ${(-(maxV + pad)).toFixed(3)} ${(maxU - minU + pad * 2).toFixed(3)} ${(maxV - minV + pad * 2).toFixed(3)}`,
+  }
+}
+
 function HorseshoePanel(props: {
   params: HorseshoeParams
+  tint: string
   disabled: boolean
   onChange: (next: HorseshoeParams) => void
   onAlign: () => void
@@ -1625,80 +1824,103 @@ function HorseshoePanel(props: {
   const geom = archGeometry(props.params)
   const area = polygonArea(horseshoePolyline(props.params))
   const height = horseshoeHeight(props.params)
+  const mark = horseshoePath(props.params)
   const set = (patch: Partial<HorseshoeParams>) => props.onChange({ ...props.params, ...patch })
   return (
-    <details className="block advanced" open>
-      <summary>设计马蹄形</summary>
-      <p className="hint">直墙 + 圆弧拱，形状对齐 docs 断面图。数值可改，用于超欠挖 Δd。</p>
-      <label htmlFor="hs-width">
-        全宽
-        <input
-          id="hs-width"
-          type="number"
-          min={0.6}
-          max={12}
-          step={0.05}
-          disabled={props.disabled}
-          value={props.params.width.toFixed(2)}
-          onChange={(event) => set({ width: Number(event.target.value) })}
-        />
-      </label>
-      <label htmlFor="hs-wall">
-        直墙高
-        <input
-          id="hs-wall"
-          type="number"
-          min={0.2}
-          max={8}
-          step={0.05}
-          disabled={props.disabled}
-          value={props.params.wallHeight.toFixed(2)}
-          onChange={(event) => set({ wallHeight: Number(event.target.value) })}
-        />
-      </label>
-      <label htmlFor="hs-radius">
-        拱半径
-        <input
-          id="hs-radius"
-          type="number"
-          min={0.4}
-          max={16}
-          step={0.05}
-          disabled={props.disabled}
-          value={props.params.archRadius.toFixed(2)}
-          onChange={(event) => set({ archRadius: Number(event.target.value) })}
-        />
-      </label>
-      <label htmlFor="hs-u">
-        横向偏移 u
-        <input
-          id="hs-u"
-          type="number"
-          min={-8}
-          max={8}
-          step={0.02}
-          disabled={props.disabled}
-          value={props.params.centerU.toFixed(2)}
-          onChange={(event) => set({ centerU: Number(event.target.value) })}
-        />
-      </label>
-      <label htmlFor="hs-v">
-        底板高（0 = 实测底面）
-        <input
-          id="hs-v"
-          type="number"
-          min={-8}
-          max={8}
-          step={0.02}
-          disabled={props.disabled}
-          value={props.params.invertV.toFixed(2)}
-          onChange={(event) => set({ invertV: Number(event.target.value) })}
-        />
-      </label>
-      <p className="hint">
-        底面基准取实测底板的平均值（v=0），装入点云后按当前断面自动对齐。总高{' '}
-        {height.toFixed(2)} m，拱矢 {geom.rise.toFixed(2)} m，设计面积 {area.toFixed(2)} m²
-      </p>
+    <section className="block">
+      <p className="hint">直墙加圆弧拱。对齐后用来算超欠挖 Δd。</p>
+      <div className="hs-sheet">
+        <svg className="hs-mark" viewBox={mark.viewBox} aria-hidden="true">
+          <path d={mark.d} stroke={props.tint} />
+        </svg>
+        <dl className="hs-stats">
+          <div>
+            <dt>总高</dt>
+            <dd>{height.toFixed(2)} m</dd>
+          </div>
+          <div>
+            <dt>拱矢</dt>
+            <dd>{geom.rise.toFixed(2)} m</dd>
+          </div>
+          <div>
+            <dt>面积</dt>
+            <dd>{area.toFixed(2)} m²</dd>
+          </div>
+        </dl>
+      </div>
+      <div className="pair-fields">
+        <label htmlFor="hs-width">
+          全宽
+          <input
+            id="hs-width"
+            type="number"
+            inputMode="decimal"
+            min={0.6}
+            max={12}
+            step={0.05}
+            disabled={props.disabled}
+            value={props.params.width.toFixed(2)}
+            onChange={(event) => set({ width: Number(event.target.value) })}
+          />
+        </label>
+        <label htmlFor="hs-wall">
+          直墙高
+          <input
+            id="hs-wall"
+            type="number"
+            inputMode="decimal"
+            min={0.2}
+            max={8}
+            step={0.05}
+            disabled={props.disabled}
+            value={props.params.wallHeight.toFixed(2)}
+            onChange={(event) => set({ wallHeight: Number(event.target.value) })}
+          />
+        </label>
+        <label htmlFor="hs-radius">
+          拱半径
+          <input
+            id="hs-radius"
+            type="number"
+            inputMode="decimal"
+            min={0.4}
+            max={16}
+            step={0.05}
+            disabled={props.disabled}
+            value={props.params.archRadius.toFixed(2)}
+            onChange={(event) => set({ archRadius: Number(event.target.value) })}
+          />
+        </label>
+        <label htmlFor="hs-u">
+          横向 u
+          <input
+            id="hs-u"
+            type="number"
+            inputMode="decimal"
+            min={-8}
+            max={8}
+            step={0.02}
+            disabled={props.disabled}
+            value={props.params.centerU.toFixed(2)}
+            onChange={(event) => set({ centerU: Number(event.target.value) })}
+          />
+        </label>
+        <label htmlFor="hs-v">
+          底板 v
+          <input
+            id="hs-v"
+            type="number"
+            inputMode="decimal"
+            min={-8}
+            max={8}
+            step={0.02}
+            disabled={props.disabled}
+            value={props.params.invertV.toFixed(2)}
+            onChange={(event) => set({ invertV: Number(event.target.value) })}
+          />
+        </label>
+      </div>
+      <p className="hint">v=0 是实测底板。</p>
       <div className="hs-actions">
         <button type="button" className="reset-look" disabled={props.disabled} onClick={props.onAlign}>
           按当前轮廓对齐
@@ -1716,7 +1938,7 @@ function HorseshoePanel(props: {
           按图纸比例
         </button>
       </div>
-    </details>
+    </section>
   )
 }
 
@@ -1727,26 +1949,26 @@ function OverlayToggles(props: {
 }) {
   const items: { key: keyof OverlayState; label: string; swatch?: string }[] = [
     { key: 'slab', label: '切片点', swatch: props.look.slice },
-    { key: 'contour', label: '内壁轮廓', swatch: props.look.contour },
+    { key: 'contour', label: '轮廓', swatch: props.look.contour },
     { key: 'fit', label: '拟合圆', swatch: props.look.fit },
-    { key: 'horseshoe', label: '设计马蹄', swatch: props.look.design },
+    { key: 'horseshoe', label: '马蹄', swatch: props.look.design },
     { key: 'inset', label: '断面图' },
   ]
   return (
-    <div className="checks">
+    <div className="stamps">
       {items.map((item) => (
-        <label key={item.key} className="check">
-          <input
-            type="checkbox"
-            checked={props.overlays[item.key]}
-            onChange={(event) => {
-              const on = event.target.checked
-              props.onChange((prev) => ({ ...prev, [item.key]: on }))
-            }}
-          />
+        <button
+          key={item.key}
+          type="button"
+          className={`stamp${props.overlays[item.key] ? ' is-on' : ''}`}
+          aria-pressed={props.overlays[item.key]}
+          onClick={() =>
+            props.onChange((prev) => ({ ...prev, [item.key]: !prev[item.key] }))
+          }
+        >
           {item.swatch ? <span className="swatch" style={{ background: item.swatch }} /> : null}
           {item.label}
-        </label>
+        </button>
       ))}
     </div>
   )
@@ -1759,43 +1981,71 @@ function ExportPanel(props: {
   disabled: boolean
   exportError: string | null
   exportUrls: Partial<Record<ExportKind, string>> | null
+  exportZip: { url: string; name: string } | null
   onKinds: Dispatch<SetStateAction<Record<ExportKind, boolean>>>
   onExport: () => void
   onPreview: (item: { url: string; label: string }) => void
 }) {
+  const labelOf = (id: ExportKind) => EXPORT_OPTIONS.find((item) => item.id === id)?.label ?? id
   return (
     <section className="block export">
-      <p className="block-title">导出</p>
-      <div className="checks">
-        {EXPORT_OPTIONS.map((item) => (
-          <label key={item.id} className="check">
-            <input
-              type="checkbox"
-              checked={props.kinds[item.id]}
-              onChange={(event) => {
-                const on = event.target.checked
-                props.onKinds((prev) => ({ ...prev, [item.id]: on }))
-              }}
-            />
-            {item.label}
-          </label>
-        ))}
-      </div>
+      {EXPORT_GROUPS.map((group) => {
+        const allOn = group.ids.every((id) => props.kinds[id])
+        return (
+          <div key={group.title} className="export-group">
+            <div className="block-head">
+              <p className="block-title">{group.title}</p>
+              <button
+                type="button"
+                className="group-all"
+                onClick={() =>
+                  props.onKinds((prev) => {
+                    const next = { ...prev }
+                    for (const id of group.ids) next[id] = !allOn
+                    return next
+                  })
+                }
+              >
+                {allOn ? '清空' : '全选'}
+              </button>
+            </div>
+            {group.hint ? <p className="hint">{group.hint}</p> : null}
+            <div className="stamps">
+              {group.ids.map((id) => (
+                <button
+                  key={id}
+                  type="button"
+                  className={`stamp${props.kinds[id] ? ' is-on' : ''}`}
+                  aria-pressed={props.kinds[id]}
+                  onClick={() => props.onKinds((prev) => ({ ...prev, [id]: !prev[id] }))}
+                >
+                  {labelOf(id)}
+                </button>
+              ))}
+            </div>
+          </div>
+        )
+      })}
+      <p className="hint">ZIP 里是 PNG，外加每张图一份 CSV；解开后运行 python replay.py 可从表格重画。</p>
       <button
         type="button"
         className="export-btn"
         onClick={props.onExport}
         disabled={props.exporting || props.disabled}
       >
-        {props.exporting ? props.exportHint || '正在出图…' : '导出当前剖面'}
+        {props.exporting ? props.exportHint || '正在出图…' : '导出 ZIP（图 + CSV）'}
       </button>
       {props.exporting && props.exportHint ? <p className="hint">{props.exportHint}</p> : null}
-      {!props.exporting ? (
-        <p className="hint">
-          本机 matplotlib 出图。多断面、面积、体积、总览用底部两端游标圈出的区间。
-        </p>
-      ) : null}
       {props.exportError ? <p className="fail">{props.exportError}</p> : null}
+      {props.exportZip ? (
+        <button
+          type="button"
+          className="reset-look"
+          onClick={() => triggerDownload(props.exportZip!.url, props.exportZip!.name)}
+        >
+          再下载 {props.exportZip.name}
+        </button>
+      ) : null}
       {props.exportUrls ? (
         <div className="thumbs">
           {EXPORT_OPTIONS.map((item) => {

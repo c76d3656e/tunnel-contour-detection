@@ -61,7 +61,16 @@ export function saveAppearance(look: Appearance): void {
 }
 
 export function applyThemeClass(theme: ThemeId): void {
-  document.documentElement.dataset.theme = theme
+  const root = document.documentElement
+  root.dataset.theme = theme
+  root.style.colorScheme = theme
+  let meta = document.querySelector('meta[name="theme-color"]')
+  if (!meta) {
+    meta = document.createElement('meta')
+    meta.setAttribute('name', 'theme-color')
+    document.head.appendChild(meta)
+  }
+  meta.setAttribute('content', theme === 'light' ? '#e6dfd2' : '#14110e')
 }
 
 export function hexToInt(hex: string): number {

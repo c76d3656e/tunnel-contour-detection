@@ -358,3 +358,439 @@ def save_overbreak_plot(path: Path, contour, design, samples, stats=None, statio
         figure.tight_layout()
         figure.savefig(path, dpi=DPI)
         plt.close(figure)
+
+
+KIND_LABELS = {
+    "section2d": "二维断面",
+    "section3d": "三维断面",
+    "tunnel3d": "隧道总览",
+    "compare": "算法对比",
+    "overbreak": "超欠挖对比",
+    "areaDepth": "桩号–面积",
+    "volumeDepth": "桩号–体积",
+    "gallery": "多断面轮廓",
+    "stack": "轮廓叠置",
+    "liveSection": "实时断面",
+}
+
+REPLAY_SCRIPT = """\
+# Re-draw every figure from data/*.csv sitting next to this file.
+# Needs numpy and matplotlib (SciencePlots optional).
+from pathlib import Path
+import sys
+
+root = Path(__file__).resolve().parent
+sys.path.insert(0, str(root))
+from plotting import replay_plot_csv
+
+out = root / "replayed"
+out.mkdir(exist_ok=True)
+for csv_path in sorted((root / "data").glob("*.csv")):
+    dest = out / f"{csv_path.stem}.png"
+    replay_plot_csv(csv_path, dest)
+    print("wrote", dest)
+"""
+
+README_TEXT = """\
+隧道剖面导出包
+==============
+
+figures/   选中的 PNG
+data/      每张图一张 CSV，列与出图函数一一对应
+plotting.py / replay.py  用 CSV 原样重画
+
+约定
+----
+以 ``# key=value`` 记录标量（桩号、厚度、拟合圆、覆盖率等）。
+``# table=名称`` 之后是表头和数值。空表只留表头。
+
+重画::
+
+    python replay.py
+
+结果写到 replayed/。每张图只依赖自己那份 CSV。
+"""
+
+
+def _as_2d(values, cols):
+    arr = np.asarray(values, dtype=float) if values is not None else np.empty((0, cols))
+    if arr.size == 0:
+        return np.empty((0, cols), dtype=float)
+    if arr.ndim == 1:
+        if arr.size == cols:
+            return arr.reshape(1, cols)
+        if cols == 1:
+            return arr.reshape(-1, 1)
+        raise ValueError("array rank does not match column count")
+    if arr.shape[1] != cols:
+        raise ValueError(f"expected {cols} columns, got {arr.shape[1]}")
+    return arr
+
+
+def _fmt_meta(value):
+    if isinstance(value, (float, np.floating)):
+        if not np.isfinite(value):
+            return ""
+        return f"{float(value):.10g}"
+    return str(value)
+
+
+def write_plot_csv(path: Path, kind, meta, tables):
+    """Write one reconstructable CSV: ``# key=value`` then ``# table=`` blocks."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        handle.write(f"# kind={kind}\n")
+        for key, value in meta.items():
+            if value is None:
+                continue
+            text = _fmt_meta(value)
+            if text == "":
+                continue
+            handle.write(f"# {key}={text}\n")
+        for name, (columns, values) in tables.items():
+            arr = _as_2d(values, len(columns))
+            handle.write(f"# table={name}\n")
+            handle.write(",".join(columns) + "\n")
+            if arr.size:
+                np.savetxt(handle, arr, delimiter=",", fmt="%.10g")
+
+
+def load_plot_csv(path: Path):
+    """Return ``(meta, tables)`` where tables map name -> (columns, ndarray)."""
+    meta = {}
+    tables = {}
+    current = None
+    columns = None
+    rows = []
+
+    def flush():
+        nonlocal current, columns, rows
+        if current is None or columns is None:
+            return
+        if rows:
+            tables[current] = (columns, np.asarray(rows, dtype=float))
+        else:
+            tables[current] = (columns, np.empty((0, len(columns)), dtype=float))
+        current = None
+        columns = None
+        rows = []
+
+    with Path(path).open(encoding="utf-8") as handle:
+        for raw in handle:
+            line = raw.strip()
+            if not line:
+                continue
+            if line.startswith("#"):
+                body = line[1:].strip()
+                if body.startswith("table="):
+                    flush()
+                    current = body.split("=", 1)[1].strip()
+                    columns = None
+                    rows = []
+                    continue
+                if "=" in body:
+                    key, value = body.split("=", 1)
+                    meta[key.strip()] = value.strip()
+                continue
+            if current is not None and columns is None:
+                columns = [item.strip() for item in line.split(",")]
+                continue
+            if current is not None and columns is not None:
+                parts = [item.strip() for item in line.split(",")]
+                rows.append([float(item) if item not in ("", "nan", "NaN") else np.nan for item in parts])
+        flush()
+    return meta, tables
+
+
+def _fit_from_meta(meta):
+    radius = meta.get("fit_radius")
+    if not radius:
+        return None
+    try:
+        r = float(radius)
+    except ValueError:
+        return None
+    if not np.isfinite(r) or r <= 0:
+        return None
+    return {
+        "center_x": float(meta.get("fit_center_x", 0)),
+        "center_y": float(meta.get("fit_center_y", 0)),
+        "radius": r,
+    }
+
+
+def _table(tables, name, cols):
+    if name not in tables:
+        return np.empty((0, cols), dtype=float)
+    _, arr = tables[name]
+    return _as_2d(arr, cols)
+
+
+def _optional_float(meta, key):
+    if key not in meta:
+        return None
+    try:
+        value = float(meta[key])
+    except ValueError:
+        return None
+    return value if np.isfinite(value) else None
+
+
+def write_kind_csv(path: Path, kind, payload):
+    """Dump one figure's plotting arrays. ``payload`` keys depend on ``kind``."""
+    fit = payload.get("fit") or {}
+    station = payload.get("station")
+    thickness = payload.get("thickness")
+    if kind in ("section2d", "liveSection"):
+        meta = {"station": station, "thickness": thickness}
+        if fit.get("radius", 0):
+            meta.update(
+                fit_center_x=fit.get("center_x"),
+                fit_center_y=fit.get("center_y"),
+                fit_radius=fit.get("radius"),
+            )
+        stats = payload.get("stats") or {}
+        for key in ("max_over", "mean_over", "max_under", "mean_under", "over_area", "under_area"):
+            if key in stats and stats[key] is not None:
+                meta[key] = stats[key]
+        u = np.asarray(payload.get("u", []), dtype=float)
+        v = np.asarray(payload.get("v", []), dtype=float)
+        tables = {
+            "point": (("u", "v"), np.column_stack((u, v)) if len(u) else np.empty((0, 2))),
+            "contour": (("u", "v"), payload.get("contour")),
+        }
+        if kind == "liveSection":
+            tables["design"] = (("u", "v"), payload.get("design"))
+        write_plot_csv(path, kind, meta, tables)
+        return
+    if kind == "section3d":
+        axis = np.asarray(payload.get("axis", [0.0, 1.0, 0.0]), dtype=float)
+        write_plot_csv(
+            path,
+            kind,
+            {
+                "station": station,
+                "thickness": thickness,
+                "axis_u": float(axis[0]),
+                "axis_s": float(axis[1]),
+                "axis_v": float(axis[2]),
+            },
+            {
+                "point": (("u", "s", "v"), payload.get("points")),
+                "contour": (("u", "s", "v"), payload.get("contour")),
+            },
+        )
+        return
+    if kind == "tunnel3d":
+        axis = np.asarray(payload.get("axis", [0.0, 1.0, 0.0]), dtype=float)
+        center = np.asarray(payload.get("center", [0.0, station or 0.0, 0.0]), dtype=float)
+        write_plot_csv(
+            path,
+            kind,
+            {
+                "station": station,
+                "thickness": thickness,
+                "axis_u": float(axis[0]),
+                "axis_s": float(axis[1]),
+                "axis_v": float(axis[2]),
+                "center_u": float(center[0]),
+                "center_s": float(center[1]),
+                "center_v": float(center[2]),
+            },
+            {
+                "point": (("u", "s", "v"), payload.get("points")),
+                "contour": (("u", "s", "v"), payload.get("contour")),
+            },
+        )
+        return
+    if kind == "compare":
+        meta = {"methods": ",".join(payload.get("methods", []))}
+        u = np.asarray(payload.get("u", []), dtype=float)
+        v = np.asarray(payload.get("v", []), dtype=float)
+        tables = {"point": (("u", "v"), np.column_stack((u, v)) if len(u) else np.empty((0, 2)))}
+        for name, result in (payload.get("results") or {}).items():
+            if result is None:
+                meta[f"coverage_{name}"] = ""
+                tables[f"contour_{name}"] = (("u", "v"), np.empty((0, 2)))
+            else:
+                contour, coverage = result
+                meta[f"coverage_{name}"] = coverage
+                tables[f"contour_{name}"] = (("u", "v"), contour)
+        write_plot_csv(path, kind, meta, tables)
+        return
+    if kind == "overbreak":
+        stats = payload.get("stats") or {}
+        meta = {"station": station}
+        for key in ("max_over", "mean_over", "max_under", "mean_under", "over_area", "under_area"):
+            if stats.get(key) is not None:
+                meta[key] = stats[key]
+        write_plot_csv(
+            path,
+            kind,
+            meta,
+            {
+                "contour": (("u", "v"), payload.get("contour")),
+                "design": (("u", "v"), payload.get("design")),
+                "sample": (("u", "v", "delta"), payload.get("samples")),
+            },
+        )
+        return
+    if kind == "areaDepth":
+        stations = np.asarray(payload.get("stations", []), dtype=float)
+        areas = np.asarray(payload.get("areas", []), dtype=float)
+        write_plot_csv(
+            path,
+            kind,
+            {},
+            {"series": (("s", "area"), np.column_stack((stations, areas)) if len(stations) else np.empty((0, 2)))},
+        )
+        return
+    if kind == "volumeDepth":
+        stations = np.asarray(payload.get("stations", []), dtype=float)
+        volumes = np.asarray(payload.get("volumes", []), dtype=float)
+        write_plot_csv(
+            path,
+            kind,
+            {},
+            {"series": (("s", "volume"), np.column_stack((stations, volumes)) if len(stations) else np.empty((0, 2)))},
+        )
+        return
+    if kind in ("gallery", "stack"):
+        sections = payload.get("sections") or []
+        design = payload.get("design")
+        contour_rows = []
+        ring_rows = []
+        for item in sections:
+            s_i, contour = item[0], item[1]
+            contour = np.asarray(contour, dtype=float)
+            if len(contour):
+                s_col = np.full((len(contour), 1), float(s_i))
+                contour_rows.append(np.column_stack((s_col, contour)))
+                ring_rows.append(np.column_stack((contour[:, 0], np.full(len(contour), float(s_i)), contour[:, 1])))
+        stacked = np.vstack(contour_rows) if contour_rows else np.empty((0, 3))
+        rings = np.vstack(ring_rows) if ring_rows else np.empty((0, 3))
+        meta = {"station": station, "n": len(sections)}
+        if kind == "gallery":
+            write_plot_csv(
+                path,
+                kind,
+                meta,
+                {
+                    "design": (("u", "v"), design),
+                    "contour": (("s", "u", "v"), stacked if stacked.size else np.empty((0, 3))),
+                },
+            )
+            return
+        write_plot_csv(path, kind, meta, {"ring": (("u", "s", "v"), rings)})
+        return
+    raise ValueError(f"unknown figure kind {kind}")
+
+
+def replay_plot_csv(csv_path: Path, png_path: Path):
+    """Redraw one PNG from its CSV using the same ``save_*`` functions."""
+    meta, tables = load_plot_csv(csv_path)
+    kind = meta.get("kind") or Path(csv_path).stem
+    station = _optional_float(meta, "station")
+    thickness = _optional_float(meta, "thickness")
+    png_path = Path(png_path)
+    png_path.parent.mkdir(parents=True, exist_ok=True)
+    if kind in ("section2d", "liveSection"):
+        point = _table(tables, "point", 2)
+        contour = _table(tables, "contour", 2)
+        u = point[:, 0] if len(point) else np.empty((0,))
+        v = point[:, 1] if len(point) else np.empty((0,))
+        fit = _fit_from_meta(meta)
+        if kind == "liveSection":
+            stats = {key: _optional_float(meta, key) for key in ("max_over", "mean_over", "max_under", "mean_under")}
+            stats = {key: value for key, value in stats.items() if value is not None}
+            save_live_section_plot(
+                png_path, u, v, contour, fit, _table(tables, "design", 2),
+                station=station, thickness=thickness, stats=stats or None,
+            )
+            return
+        save_section_plot(png_path, u, v, contour, fit, station=station)
+        return
+    if kind == "section3d":
+        axis = np.array([
+            float(meta.get("axis_u", 0)),
+            float(meta.get("axis_s", 1)),
+            float(meta.get("axis_v", 0)),
+        ])
+        save_section_3d_plot(
+            png_path, _table(tables, "point", 3), _table(tables, "contour", 3),
+            axis, thickness if thickness is not None else 0.2, station=station,
+        )
+        return
+    if kind == "tunnel3d":
+        axis = np.array([
+            float(meta.get("axis_u", 0)),
+            float(meta.get("axis_s", 1)),
+            float(meta.get("axis_v", 0)),
+        ])
+        center = np.array([
+            float(meta.get("center_u", 0)),
+            float(meta.get("center_s", station or 0)),
+            float(meta.get("center_v", 0)),
+        ])
+        save_tunnel_3d_plot(
+            png_path, _table(tables, "point", 3), _table(tables, "contour", 3),
+            axis, thickness if thickness is not None else 0.2, center, station=station,
+        )
+        return
+    if kind == "compare":
+        point = _table(tables, "point", 2)
+        methods = [item for item in meta.get("methods", "").split(",") if item]
+        results = {}
+        for name in methods:
+            contour = _table(tables, f"contour_{name}", 2)
+            cov = _optional_float(meta, f"coverage_{name}")
+            results[name] = None if len(contour) == 0 else (contour, cov if cov is not None else 0.0)
+        save_contour_comparison(png_path, point[:, 0] if len(point) else [], point[:, 1] if len(point) else [], results)
+        return
+    if kind == "overbreak":
+        stats = {key: _optional_float(meta, key) for key in ("max_over", "mean_over", "max_under", "mean_under", "over_area", "under_area")}
+        stats = {key: value for key, value in stats.items() if value is not None}
+        save_overbreak_plot(
+            png_path, _table(tables, "contour", 2), _table(tables, "design", 2),
+            _table(tables, "sample", 3), stats=stats or None, station=station,
+        )
+        return
+    if kind == "areaDepth":
+        series = _table(tables, "series", 2)
+        save_area_depth_plot(png_path, series[:, 0] if len(series) else [], series[:, 1] if len(series) else [])
+        return
+    if kind == "volumeDepth":
+        series = _table(tables, "series", 2)
+        save_volume_depth_plot(png_path, series[:, 0] if len(series) else [], series[:, 1] if len(series) else [])
+        return
+    if kind == "gallery":
+        design = _table(tables, "design", 2)
+        stacked = _table(tables, "contour", 3)
+        sections = []
+        if len(stacked):
+            for s_i in np.unique(stacked[:, 0]):
+                panel = stacked[stacked[:, 0] == s_i][:, 1:3]
+                sections.append((float(s_i), panel, design))
+        save_contour_gallery(png_path, sections, station=station)
+        return
+    if kind == "stack":
+        rings_data = _table(tables, "ring", 3)
+        rings = []
+        if len(rings_data):
+            for s_i in np.unique(rings_data[:, 1]):
+                panel = rings_data[rings_data[:, 1] == s_i]
+                if len(panel):
+                    rings.append(panel)
+        save_contour_stack_plot(png_path, rings)
+        return
+    raise ValueError(f"unknown figure kind {kind}")
+
+
+def manifest_csv(kinds):
+    lines = ["kind,label,png,csv"]
+    for kind in kinds:
+        label = KIND_LABELS.get(kind, kind)
+        lines.append(f"{kind},{label},figures/{kind}.png,data/{kind}.csv")
+    return "\n".join(lines) + "\n"
+

@@ -131,6 +131,113 @@ def render_figures(kinds, thickness, station, fit, methods):
             save_contour_stack_plot(path, rings)
             files["stack"] = str(path)
     return files
+
+
+def _compare_results(methods):
+    results = {}
+    for name in methods:
+        raw = _xy(f"/tmp/contour_{name}.bin")
+        cov_path = Path(f"/tmp/cov_{name}.txt")
+        if cov_path.exists() and raw.size:
+            coverage = float(cov_path.read_text())
+            results[name] = (raw, coverage)
+        else:
+            results[name] = None
+    return results
+
+
+def _gallery_sections(design):
+    n = int(Path("/tmp/gallery_n.txt").read_text() or "0")
+    sections = []
+    for i in range(n):
+        s_i = float(Path(f"/tmp/gallery_{i}_s.txt").read_text())
+        c_i = _xy(f"/tmp/gallery_{i}.bin")
+        sections.append((s_i, c_i, design))
+    return sections
+
+
+def export_bundle(kinds, thickness, station, fit, methods):
+    import zipfile
+    files = render_figures(kinds, thickness, station, fit, methods)
+    if kinds == ["liveSection"]:
+        return files, ""
+    u = _f8("/tmp/u.bin")
+    v = _f8("/tmp/v.bin")
+    contour = _xy("/tmp/contour.bin")
+    s_pts = _f8("/tmp/z.bin")
+    overview = _uvs_to_usv(_xyz("/tmp/overview.bin"))
+    design = _xy("/tmp/design.bin")
+    stations = _f8("/tmp/stations.bin")
+    areas = _f8("/tmp/areas.bin")
+    volumes = _f8("/tmp/volumes.bin")
+    samples = _xyz("/tmp/samples.bin")
+    stats = json.loads(Path("/tmp/stats.json").read_text() or "null")
+    slab = _usv(u, v, s_pts)
+    contour_xyz = _usv(contour[:, 0], contour[:, 1], station) if len(contour) else np.empty((0, 3))
+    axis = np.array([0.0, 1.0, 0.0])
+    csv_dir = Path("/tmp/csv")
+    if csv_dir.exists():
+        import shutil
+        shutil.rmtree(csv_dir)
+    csv_dir.mkdir(exist_ok=True)
+    if "section2d" in kinds:
+        write_kind_csv(csv_dir / "section2d.csv", "section2d", {
+            "u": u, "v": v, "contour": contour, "fit": fit, "station": station,
+        })
+    if "liveSection" in kinds:
+        write_kind_csv(csv_dir / "liveSection.csv", "liveSection", {
+            "u": u, "v": v, "contour": contour, "fit": fit, "design": design,
+            "station": station, "thickness": thickness, "stats": stats,
+        })
+    if "section3d" in kinds:
+        write_kind_csv(csv_dir / "section3d.csv", "section3d", {
+            "points": slab, "contour": contour_xyz, "axis": axis,
+            "thickness": thickness, "station": station,
+        })
+    if "tunnel3d" in kinds:
+        center = contour_xyz.mean(axis=0) if len(contour_xyz) else np.array([0.0, station, 0.0])
+        write_kind_csv(csv_dir / "tunnel3d.csv", "tunnel3d", {
+            "points": overview, "contour": contour_xyz, "axis": axis, "center": center,
+            "thickness": thickness, "station": station,
+        })
+    if "compare" in kinds:
+        write_kind_csv(csv_dir / "compare.csv", "compare", {
+            "u": u, "v": v, "methods": methods, "results": _compare_results(methods),
+        })
+    if "overbreak" in kinds:
+        write_kind_csv(csv_dir / "overbreak.csv", "overbreak", {
+            "contour": contour, "design": design, "samples": samples,
+            "stats": stats, "station": station,
+        })
+    if "areaDepth" in kinds:
+        write_kind_csv(csv_dir / "areaDepth.csv", "areaDepth", {
+            "stations": stations, "areas": areas,
+        })
+    if "volumeDepth" in kinds:
+        write_kind_csv(csv_dir / "volumeDepth.csv", "volumeDepth", {
+            "stations": stations, "volumes": volumes,
+        })
+    gallery_kinds = [name for name in ("gallery", "stack") if name in kinds]
+    if gallery_kinds:
+        sections = _gallery_sections(design)
+        for name in gallery_kinds:
+            write_kind_csv(csv_dir / f"{name}.csv", name, {
+                "sections": sections, "design": design, "station": station,
+            })
+    zip_path = Path("/tmp/figures.zip")
+    csv_kinds = [p.stem for p in sorted(csv_dir.glob("*.csv"))]
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for kind, png in files.items():
+            zf.write(png, f"figures/{kind}.png")
+        for csv_file in sorted(csv_dir.glob("*.csv")):
+            zf.write(csv_file, f"data/{csv_file.name}")
+        plotting_src = Path("/tmp/plotting.py")
+        if plotting_src.exists():
+            zf.write(plotting_src, "plotting.py")
+        zf.writestr("replay.py", REPLAY_SCRIPT)
+        zf.writestr("README.txt", README_TEXT)
+        zf.writestr("manifest.csv", manifest_csv(csv_kinds))
+    return files, str(zip_path)
 `
 
 type PyodideRuntime = Awaited<ReturnType<typeof loadPyodide>>
@@ -187,6 +294,7 @@ os.environ["MPLBACKEND"] = "Agg"
       )
     }
     runtime.runPython(plottingSrc)
+    runtime.FS.writeFile('/tmp/plotting.py', plottingSrc)
     runtime.runPython(BOOTSTRAP)
     pyodide = runtime
     postProgress('matplotlib 已在本机就绪')
@@ -210,6 +318,7 @@ self.onmessage = async (event: MessageEvent<{ type: 'init' } | { type: 'plot'; p
     const runtime = await ensurePyodide()
     const pack = event.data.pack
     postProgress('正在用 matplotlib 出图')
+    runtime.FS.writeFile('/tmp/plotting.py', plottingSrc)
     writeF64(runtime, '/tmp/u.bin', pack.u)
     writeF64(runtime, '/tmp/v.bin', pack.v)
     writeF64(runtime, '/tmp/z.bin', pack.z)
@@ -250,7 +359,7 @@ self.onmessage = async (event: MessageEvent<{ type: 'init' } | { type: 'plot'; p
         })
       : 'null'
     runtime.runPython(`
-files = render_figures(
+files, zip_path = export_bundle(
     json.loads(${JSON.stringify(JSON.stringify(pack.kinds))}),
     ${pack.thickness},
     ${pack.s},
@@ -266,8 +375,16 @@ files = render_figures(
       const bytes = runtime.FS.readFile(path)
       blobs[kind as ExportKind] = new Blob([bytes.slice()], { type: 'image/png' })
     }
+    const zipPathProxy = runtime.globals.get('zip_path') as { toString: () => string; destroy?: () => void }
+    const zipPath = String(zipPathProxy ?? '')
+    zipPathProxy?.destroy?.()
+    let zip: ArrayBuffer | null = null
+    if (zipPath && zipPath !== 'None' && zipPath !== '') {
+      const zipBytes = runtime.FS.readFile(zipPath)
+      zip = zipBytes.buffer.slice(zipBytes.byteOffset, zipBytes.byteOffset + zipBytes.byteLength)
+    }
     const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 15)
-    self.postMessage({ type: 'plotted', stamp, blobs })
+    self.postMessage({ type: 'plotted', stamp, blobs, zip })
   } catch (error) {
     const message = error instanceof Error ? error.message : 'matplotlib 出图失败'
     self.postMessage({ type: 'error', message })

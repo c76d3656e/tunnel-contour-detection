@@ -76,6 +76,8 @@ export interface SliceResult {
 export interface ExportResult {
   stamp: string
   urls: Partial<Record<ExportKind, string>>
+  zipUrl: string | null
+  zipName: string
 }
 
 export const METHODS = ['legacy', 'statistical', 'radius', 'hampel', 'robust', 'spline'] as const

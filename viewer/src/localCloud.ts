@@ -23,6 +23,7 @@ interface WorkerPlotted {
   type: 'plotted'
   stamp: string
   blobs: Partial<Record<ExportKind, Blob>>
+  zip?: ArrayBuffer | null
 }
 
 interface WorkerError {
@@ -140,7 +141,7 @@ export class LocalCloud {
         worker.postMessage({ type: 'export', params, kinds, horseshoe })
       })
       if (packed.type !== 'packed') throw new Error('切片数据准备失败')
-      this.plotProgress?.('正在用 matplotlib 出图')
+      this.plotProgress?.('正在出图并打包 ZIP')
       const plotter = this.ensurePlotWorker()
       const plotted = await new Promise<WorkerPlotted>((resolve, reject) => {
         this.pendingPlot = { resolve, reject }
@@ -150,7 +151,15 @@ export class LocalCloud {
       for (const [key, blob] of Object.entries(plotted.blobs) as [ExportKind, Blob | undefined][]) {
         if (blob) urls[key] = URL.createObjectURL(blob)
       }
-      return { stamp: plotted.stamp, urls }
+      const zipUrl = plotted.zip
+        ? URL.createObjectURL(new Blob([plotted.zip], { type: 'application/zip' }))
+        : null
+      return {
+        stamp: plotted.stamp,
+        urls,
+        zipUrl,
+        zipName: `tunnel-figures-${plotted.stamp}.zip`,
+      }
     } finally {
       this.plotProgress = null
     }
