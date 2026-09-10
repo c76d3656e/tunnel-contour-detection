@@ -13,6 +13,7 @@ export interface PreviewFrame {
   contour_uv: number[][]
   fit: Fit | null
   fit_line: number[][]
+  horseshoe_uv?: number[][]
   slab: number[][]
 }
 

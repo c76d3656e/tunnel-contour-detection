@@ -1,8 +1,14 @@
 import type { ExportKind, Fit } from './types'
+import type { OverbreakStats } from './horseshoe'
 
 export interface PackedCompare {
   method: string
   coverage: number
+  contour: Float64Array
+}
+
+export interface PackedGallery {
+  s: number
   contour: Float64Array
 }
 
@@ -21,6 +27,13 @@ export interface PackedExport {
   fit: Fit | null
   overview: Float64Array
   compare: PackedCompare[]
+  design: Float64Array
+  stations: Float64Array
+  areas: Float64Array
+  volumes: Float64Array
+  gallery: PackedGallery[]
+  samples: Float64Array
+  stats: OverbreakStats | null
 }
 
 export function flattenContour(contour: number[][]): Float64Array {
@@ -96,6 +109,12 @@ export function transferList(pack: PackedExport): Transferable[] {
   add(pack.z)
   add(pack.contour)
   add(pack.overview)
+  add(pack.design)
+  add(pack.stations)
+  add(pack.areas)
+  add(pack.volumes)
+  add(pack.samples)
   for (const item of pack.compare) add(item.contour)
+  for (const item of pack.gallery) add(item.contour)
   return buffers
 }

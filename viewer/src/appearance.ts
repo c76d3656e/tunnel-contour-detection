@@ -7,6 +7,7 @@ export interface Appearance {
   contour: string
   fit: string
   slice: string
+  design: string
 }
 
 const STORAGE_KEY = 'tunnel-appearance-v1'
@@ -18,6 +19,7 @@ export const THEME_DEFAULTS: Record<ThemeId, Omit<Appearance, 'theme'>> = {
     contour: '#ff5a1f',
     fit: '#3ad0ff',
     slice: '#e8b04a',
+    design: '#8dff6a',
   },
   light: {
     brightness: 0.55,
@@ -25,6 +27,7 @@ export const THEME_DEFAULTS: Record<ThemeId, Omit<Appearance, 'theme'>> = {
     contour: '#c2410c',
     fit: '#1d4ed8',
     slice: '#b45309',
+    design: '#15803d',
   },
 }
 
@@ -46,6 +49,7 @@ export function loadAppearance(): Appearance {
       contour: isHex(parsed.contour) ? parsed.contour : base.contour,
       fit: isHex(parsed.fit) ? parsed.fit : base.fit,
       slice: isHex(parsed.slice) ? parsed.slice : base.slice,
+      design: isHex(parsed.design) ? parsed.design : base.design,
     }
   } catch {
     return defaultAppearance()

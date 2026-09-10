@@ -1,4 +1,4 @@
-from pathlib import Path
+import{loadPyodide as x}from"https://cdn.jsdelivr.net/pyodide/v0.27.7/full/pyodide.mjs";var _=`from pathlib import Path
 import numpy as np
 
 def _sample(x, y, limit=12000):
@@ -50,7 +50,7 @@ def save_contour_comparison(path: Path, x, y, results):
         if len(contour):
             closed = np.vstack((contour, contour[0]))
             axis.plot(closed[:, 0], closed[:, 1], color="crimson", lw=1)
-        title = method if result is None else f"{method}\nN={len(contour)}, coverage={result[1]:.2f}"
+        title = method if result is None else f"{method}\\nN={len(contour)}, coverage={result[1]:.2f}"
         axis.set_title(title, fontsize=9)
         axis.set_aspect("equal", adjustable="box")
         axis.grid(alpha=0.15)
@@ -274,9 +274,9 @@ def save_overbreak_plot(path: Path, contour, design, samples, stats=None):
     axis.set_aspect("equal", adjustable="box")
     axis.set_xlabel("section u (m)")
     axis.set_ylabel("section v (m)")
-    title = "Over / under break  $\\Delta d$ (m)"
+    title = "Over / under break  $\\\\Delta d$ (m)"
     if stats:
-        title += (f"\nover max {stats.get('max_over', 0):.3f}, mean {stats.get('mean_over', 0):.3f}; "
+        title += (f"\\nover max {stats.get('max_over', 0):.3f}, mean {stats.get('mean_over', 0):.3f}; "
                   f"under max {stats.get('max_under', 0):.3f}, mean {stats.get('mean_under', 0):.3f}")
     axis.set_title(title, fontsize=10)
     axis.grid(alpha=0.2)
@@ -284,3 +284,118 @@ def save_overbreak_plot(path: Path, contour, design, samples, stats=None):
     figure.tight_layout()
     figure.savefig(path)
     plt.close(figure)
+`;const y="https://cdn.jsdelivr.net/pyodide/v0.27.7/full/",h=`
+import json
+from pathlib import Path
+import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+
+def _f8(path):
+    data = Path(path).read_bytes()
+    if not data:
+        return np.empty((0,), dtype=np.float64)
+    return np.frombuffer(data, dtype="<f8")
+
+def _xy(path):
+    raw = _f8(path)
+    if raw.size == 0:
+        return np.empty((0, 2), dtype=np.float64)
+    return raw.reshape(-1, 2)
+
+def _xyz(path):
+    raw = _f8(path)
+    if raw.size == 0:
+        return np.empty((0, 3), dtype=np.float64)
+    return raw.reshape(-1, 3)
+
+def render_figures(kinds, thickness, station, fit, methods):
+    u = _f8("/tmp/u.bin")
+    v = _f8("/tmp/v.bin")
+    contour = _xy("/tmp/contour.bin")
+    slab = _xyz("/tmp/slab_xyz.bin")
+    contour_xyz = _xyz("/tmp/contour_xyz.bin")
+    overview = _xyz("/tmp/overview.bin")
+    origin = _f8("/tmp/origin.bin")
+    axis = _f8("/tmp/axis.bin")
+    design = _xy("/tmp/design.bin")
+    stations = _f8("/tmp/stations.bin")
+    areas = _f8("/tmp/areas.bin")
+    volumes = _f8("/tmp/volumes.bin")
+    samples = _xyz("/tmp/samples.bin")
+    stats = json.loads(Path("/tmp/stats.json").read_text() or "null")
+    files = {}
+    if "section2d" in kinds:
+        path = Path("/tmp/section_2d.png")
+        save_section_plot(path, u, v, contour, fit)
+        files["section2d"] = str(path)
+    if "section3d" in kinds:
+        path = Path("/tmp/section_3d.png")
+        save_section_3d_plot(path, slab, contour_xyz, axis, thickness)
+        files["section3d"] = str(path)
+    if "tunnel3d" in kinds:
+        path = Path("/tmp/tunnel_3d.png")
+        center = origin + station * axis
+        save_tunnel_3d_plot(path, overview, contour_xyz, axis, thickness, center)
+        files["tunnel3d"] = str(path)
+    if "compare" in kinds:
+        results = {}
+        for name in methods:
+            raw = _xy(f"/tmp/contour_{name}.bin")
+            cov_path = Path(f"/tmp/cov_{name}.txt")
+            if cov_path.exists() and raw.size:
+                coverage = float(cov_path.read_text())
+                results[name] = (raw, coverage)
+            else:
+                results[name] = None
+        path = Path("/tmp/methods.png")
+        save_contour_comparison(path, u, v, results)
+        files["compare"] = str(path)
+    if "overbreak" in kinds:
+        path = Path("/tmp/overbreak.png")
+        save_overbreak_plot(path, contour, design, samples, stats)
+        files["overbreak"] = str(path)
+    if "areaDepth" in kinds:
+        path = Path("/tmp/area_depth.png")
+        save_area_depth_plot(path, stations, areas)
+        files["areaDepth"] = str(path)
+    if "volumeDepth" in kinds:
+        path = Path("/tmp/volume_depth.png")
+        save_volume_depth_plot(path, stations, volumes)
+        files["volumeDepth"] = str(path)
+    if "gallery" in kinds or "stack" in kinds:
+        n = int(Path("/tmp/gallery_n.txt").read_text() or "0")
+        sections = []
+        rings = []
+        for i in range(n):
+            s_i = float(Path(f"/tmp/gallery_{i}_s.txt").read_text())
+            c_i = _xy(f"/tmp/gallery_{i}.bin")
+            sections.append((s_i, c_i, design))
+            if len(c_i):
+                ring = np.column_stack((c_i[:, 0], np.full(len(c_i), s_i), c_i[:, 1]))
+                rings.append(ring)
+        if "gallery" in kinds:
+            path = Path("/tmp/gallery.png")
+            save_contour_gallery(path, sections)
+            files["gallery"] = str(path)
+        if "stack" in kinds:
+            path = Path("/tmp/stack.png")
+            save_contour_stack_plot(path, rings)
+            files["stack"] = str(path)
+    return files
+`;let d=null,m=null;function f(e){self.postMessage({type:"progress",message:e})}function i(e,n,t){e.FS.writeFile(n,new Uint8Array(t.buffer,t.byteOffset,t.byteLength))}async function g(){if(d)return d;if(m)return m;m=(async()=>{f("正在加载 Python WASM（首次较慢）");const e=await x({indexURL:y});return f("正在装入 numpy / matplotlib"),await e.loadPackage(["numpy","matplotlib"],{messageCallback:n=>f(String(n))}),e.runPython(`
+import os
+os.makedirs("/tmp/mplconfig", exist_ok=True)
+os.environ["MPLCONFIGDIR"] = "/tmp/mplconfig"
+os.environ["MPLBACKEND"] = "Agg"
+`),e.runPython(_),e.runPython(h),d=e,f("matplotlib 已在本机就绪"),e})();try{return await m}catch(e){throw m=null,e}}self.onmessage=async e=>{try{if(e.data.type==="init"){await g(),self.postMessage({type:"ready"});return}const n=await g(),t=e.data.pack;f("正在用 matplotlib 出图"),i(n,"/tmp/u.bin",t.u),i(n,"/tmp/v.bin",t.v),i(n,"/tmp/contour.bin",t.contour),i(n,"/tmp/slab_xyz.bin",b(t)),i(n,"/tmp/contour_xyz.bin",v(t)),i(n,"/tmp/overview.bin",t.overview),i(n,"/tmp/origin.bin",t.origin),i(n,"/tmp/axis.bin",t.axis),i(n,"/tmp/design.bin",t.design),i(n,"/tmp/stations.bin",t.stations),i(n,"/tmp/areas.bin",t.areas),i(n,"/tmp/volumes.bin",t.volumes),i(n,"/tmp/samples.bin",t.samples),n.FS.writeFile("/tmp/stats.json",t.stats?JSON.stringify({max_over:t.stats.maxOver,mean_over:t.stats.meanOver,max_under:t.stats.maxUnder,mean_under:t.stats.meanUnder,over_area:t.stats.overArea,under_area:t.stats.underArea}):"null"),n.FS.writeFile("/tmp/gallery_n.txt",String(t.gallery.length)),t.gallery.forEach((a,c)=>{i(n,`/tmp/gallery_${c}.bin`,a.contour),n.FS.writeFile(`/tmp/gallery_${c}_s.txt`,String(a.s))});for(const a of t.compare)i(n,`/tmp/contour_${a.method}.bin`,a.contour),n.FS.writeFile(`/tmp/cov_${a.method}.txt`,String(a.coverage));const l=t.fit?JSON.stringify({center_x:t.fit.center_x,center_y:t.fit.center_y,radius:t.fit.radius}):"null";n.runPython(`
+files = render_figures(
+    json.loads(${JSON.stringify(JSON.stringify(t.kinds))}),
+    ${t.thickness},
+    ${t.s},
+    json.loads(${JSON.stringify(l)}),
+    json.loads(${JSON.stringify(JSON.stringify(t.compare.map(a=>a.method)))}),
+)
+`);const o=n.globals.get("files"),r=o.toJs({dict_converter:Object.fromEntries});o.destroy?.();const s={};for(const[a,c]of Object.entries(r)){const u=n.FS.readFile(c);s[a]=new Blob([u.slice()],{type:"image/png"})}const p=new Date().toISOString().replace(/[-:T]/g,"").slice(0,15);self.postMessage({type:"plotted",stamp:p,blobs:s})}catch(n){const t=n instanceof Error?n.message:"matplotlib 出图失败";self.postMessage({type:"error",message:t})}};function b(e){const n=e.u.length,t=new Float64Array(n*3),l=e.origin,o=e.axis,r=e.uAxis,s=e.vAxis;for(let p=0;p<n;p+=1){const a=e.u[p],c=e.v[p],u=e.z[p];t[p*3]=l[0]+a*r[0]+c*s[0]+u*o[0],t[p*3+1]=l[1]+a*r[1]+c*s[1]+u*o[1],t[p*3+2]=l[2]+a*r[2]+c*s[2]+u*o[2]}return t}function v(e){const n=e.contour.length/2|0,t=new Float64Array(n),l=new Float64Array(n),o=new Float64Array(n);for(let s=0;s<n;s+=1)t[s]=e.contour[s*2],l[s]=e.contour[s*2+1],o[s]=e.s;const r=new Float64Array(n*3);for(let s=0;s<n;s+=1)r[s*3]=e.origin[0]+t[s]*e.uAxis[0]+l[s]*e.vAxis[0]+o[s]*e.axis[0],r[s*3+1]=e.origin[1]+t[s]*e.uAxis[1]+l[s]*e.vAxis[1]+o[s]*e.axis[1],r[s*3+2]=e.origin[2]+t[s]*e.uAxis[2]+l[s]*e.vAxis[2]+o[s]*e.axis[2];return r}

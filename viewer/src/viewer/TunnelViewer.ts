@@ -19,6 +19,7 @@ export interface OverlayFlags {
   slab: boolean
   contour: boolean
   fit: boolean
+  horseshoe?: boolean
 }
 
 function makeSpriteTexture(THREE: ThreeNS): THREE.CanvasTexture {
@@ -79,10 +80,13 @@ export class TunnelViewer {
   private cloudMat: THREE.PointsMaterial | null = null
   private contourLine: Line2 | null = null
   private fitLine: Line2 | null = null
+  private horseshoeLine: Line2 | null = null
   private contourGeom: LineGeometry | null = null
   private fitGeom: LineGeometry | null = null
+  private horseshoeGeom: LineGeometry | null = null
   private contourMat: LineMaterial | null = null
   private fitMat: LineMaterial | null = null
+  private horseshoeMat: LineMaterial | null = null
   private observer: ResizeObserver | null = null
   private raf = 0
   private lastTick = 0
@@ -92,7 +96,7 @@ export class TunnelViewer {
   private stationPrimed = false
   private uvExtent = 4
   private reduceMotion = false
-  private overlays: OverlayFlags = { slab: true, contour: true, fit: true }
+  private overlays: OverlayFlags = { slab: true, contour: true, fit: true, horseshoe: true }
   private look: Appearance = defaultAppearance()
   private lastMeta: Meta | null = null
   private yMin = 0
@@ -180,6 +184,7 @@ export class TunnelViewer {
     this.sliceUniforms.uStation.value = s
     if (this.contourLine) this.contourLine.position.z = s
     if (this.fitLine) this.fitLine.position.z = s
+    if (this.horseshoeLine) this.horseshoeLine.position.z = s
   }
 
   setThickness(thickness: number): void {
@@ -201,12 +206,16 @@ export class TunnelViewer {
     if (this.fitLine) {
       this.fitLine.visible = flags.fit && Boolean(this.fitLine.userData.alive)
     }
+    if (this.horseshoeLine) {
+      this.horseshoeLine.visible = Boolean(flags.horseshoe) && Boolean(this.horseshoeLine.userData.alive)
+    }
   }
 
   applyPreview(frame: PreviewFrame): void {
     if (this.disposed) return
     this.updateLine(this.contourGeom, this.contourLine, this.overlays.contour, frame.contour_uv)
     this.updateLine(this.fitGeom, this.fitLine, this.overlays.fit, frame.fit_line)
+    this.updateLine(this.horseshoeGeom, this.horseshoeLine, Boolean(this.overlays.horseshoe), frame.horseshoe_uv ?? [])
   }
 
   applySlice(slice: SliceResult): void {
@@ -218,6 +227,7 @@ export class TunnelViewer {
       contour_uv: slice.contour_uv,
       fit: slice.fit,
       fit_line: slice.fit_line,
+      horseshoe_uv: [],
       slab: [],
     })
   }
@@ -245,8 +255,10 @@ export class TunnelViewer {
     this.cloudMat?.dispose()
     this.contourGeom?.dispose()
     this.fitGeom?.dispose()
+    this.horseshoeGeom?.dispose()
     this.contourMat?.dispose()
     this.fitMat?.dispose()
+    this.horseshoeMat?.dispose()
     this.renderer?.dispose()
     this.renderer?.forceContextLoss()
   }
@@ -369,6 +381,7 @@ varying float vSlice;`,
     ;(baseU.value as InstanceType<ThreeNS['Vector3']>).set(base[0], base[1], base[2])
     this.contourMat?.color.setHex(hexToInt(this.look.contour))
     this.fitMat?.color.setHex(hexToInt(this.look.fit))
+    this.horseshoeMat?.color.setHex(hexToInt(this.look.design))
   }
 
   private buildLines(
@@ -378,8 +391,10 @@ varying float vSlice;`,
   ): void {
     this.contourGeom = new LineGeometryCtor()
     this.fitGeom = new LineGeometryCtor()
+    this.horseshoeGeom = new LineGeometryCtor()
     this.contourGeom.setPositions([0, 0, 0, 0, 0, 0])
     this.fitGeom.setPositions([0, 0, 0, 0, 0, 0])
+    this.horseshoeGeom.setPositions([0, 0, 0, 0, 0, 0])
     this.contourMat = new LineMaterialCtor({
       color: hexToInt(this.look.contour),
       linewidth: 3.1,
@@ -398,18 +413,35 @@ varying float vSlice;`,
       depthTest: true,
       worldUnits: false,
     })
+    this.horseshoeMat = new LineMaterialCtor({
+      color: hexToInt(this.look.design),
+      linewidth: 2.4,
+      dashed: true,
+      dashSize: 0.12,
+      gapSize: 0.08,
+      transparent: true,
+      opacity: 0.95,
+      depthTest: true,
+      worldUnits: false,
+    })
     this.contourLine = new Line2Ctor(this.contourGeom, this.contourMat)
     this.fitLine = new Line2Ctor(this.fitGeom, this.fitMat)
+    this.horseshoeLine = new Line2Ctor(this.horseshoeGeom, this.horseshoeMat)
     this.contourLine.frustumCulled = false
     this.fitLine.frustumCulled = false
+    this.horseshoeLine.frustumCulled = false
     this.contourLine.renderOrder = 4
     this.fitLine.renderOrder = 4
+    this.horseshoeLine.renderOrder = 5
     this.contourLine.visible = false
     this.fitLine.visible = false
+    this.horseshoeLine.visible = false
     this.contourLine.userData.alive = false
     this.fitLine.userData.alive = false
+    this.horseshoeLine.userData.alive = false
     this.scene!.add(this.contourLine)
     this.scene!.add(this.fitLine)
+    this.scene!.add(this.horseshoeLine)
   }
 
   private placeHorizon(yMin: number, meta: Meta): void {
@@ -485,6 +517,7 @@ varying float vSlice;`,
     camera.updateProjectionMatrix()
     this.contourMat?.resolution.set(width, height)
     this.fitMat?.resolution.set(width, height)
+    this.horseshoeMat?.resolution.set(width, height)
   }
 
   private tick = (now: number): void => {

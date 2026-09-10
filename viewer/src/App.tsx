@@ -26,6 +26,21 @@ import {
   type Appearance,
   type ThemeId,
 } from './appearance'
+import {
+  alignToContour,
+  applyDrawingRatios,
+  archGeometry,
+  clampHorseshoe,
+  horseshoeHeight,
+  horseshoePolyline,
+  loadHorseshoe,
+  overbreakStats,
+  polarSamples,
+  polygonArea,
+  saveHorseshoe,
+  type HorseshoeParams,
+  type PolarSample,
+} from './horseshoe'
 
 const THICK_MIN = 0.05
 const THICK_MAX = 1
@@ -47,6 +62,11 @@ const EXPORT_OPTIONS: { id: ExportKind; label: string }[] = [
   { id: 'section3d', label: '三维断面' },
   { id: 'tunnel3d', label: '隧道总览' },
   { id: 'compare', label: '算法对比' },
+  { id: 'overbreak', label: '超欠挖对比' },
+  { id: 'areaDepth', label: '桩号–面积' },
+  { id: 'volumeDepth', label: '桩号–体积' },
+  { id: 'gallery', label: '多断面轮廓' },
+  { id: 'stack', label: '轮廓叠置' },
 ]
 
 interface HudState {
@@ -54,12 +74,19 @@ interface HudState {
   pointCount: number
   coverage: number
   radius: number | null
+  maxOver: number | null
+  meanOver: number | null
+  maxUnder: number | null
+  meanUnder: number | null
+  overArea: number | null
+  underArea: number | null
 }
 
 interface OverlayState {
   slab: boolean
   contour: boolean
   fit: boolean
+  horseshoe: boolean
   inset: boolean
 }
 
@@ -136,6 +163,7 @@ function drawUvInset(
   slice: PreviewFrame | null,
   uvExtent: number,
   look: Appearance,
+  design?: { poly: number[][]; polar: PolarSample[]; show: boolean },
 ): void {
   const ctx = canvas.getContext('2d')
   if (!ctx) return
@@ -217,6 +245,30 @@ function drawUvInset(
     ctx.closePath()
     ctx.stroke()
   }
+
+  if (design?.show && design.poly.length > 1) {
+    ctx.strokeStyle = look.design
+    ctx.lineWidth = 1.55 * unit
+    ctx.setLineDash([6 * unit, 4 * unit])
+    ctx.beginPath()
+    ctx.moveTo(xOf(design.poly[0][0]), yOf(design.poly[0][1]))
+    for (let i = 1; i < design.poly.length; i += 1) {
+      ctx.lineTo(xOf(design.poly[i][0]), yOf(design.poly[i][1]))
+    }
+    ctx.stroke()
+    ctx.setLineDash([])
+    if (width >= 540 && design.polar.length) {
+      ctx.font = `${9 * unit}px "IBM Plex Sans", "Noto Sans SC", sans-serif`
+      ctx.textAlign = 'left'
+      ctx.textBaseline = 'bottom'
+      const step = Math.max(1, Math.round(design.polar.length / 16))
+      for (let i = 0; i < design.polar.length; i += step) {
+        const sample = design.polar[i]
+        ctx.fillStyle = sample.delta >= 0 ? '#15803d' : '#c2410c'
+        ctx.fillText(`${sample.delta >= 0 ? '+' : ''}${sample.delta.toFixed(3)}`, xOf(sample.u) + 3 * unit, yOf(sample.v) - 2 * unit)
+      }
+    }
+  }
   ctx.restore()
 
   ctx.strokeStyle = '#333333'
@@ -281,6 +333,14 @@ export function App() {
   const slicerRef = useRef<LiveSlicer | null>(null)
   const lastFrameRef = useRef<PreviewFrame | null>(null)
   const lookRef = useRef<Appearance>(loadAppearance())
+  const horseshoeRef = useRef<HorseshoeParams>(loadHorseshoe())
+  const overlaysRef = useRef<OverlayState>({
+    slab: true,
+    contour: true,
+    fit: true,
+    horseshoe: true,
+    inset: true,
+  })
 
   const [health, setHealth] = useState<Health>({ status: 'idle', message: '打开一卷 LAS 点云' })
   const [error, setError] = useState<string | null>(null)
@@ -296,14 +356,21 @@ export function App() {
     slab: true,
     contour: true,
     fit: true,
+    horseshoe: true,
     inset: true,
   })
+  const [horseshoe, setHorseshoe] = useState<HorseshoeParams>(() => horseshoeRef.current)
   const [hud, setHud] = useState<HudState | null>(null)
   const [kinds, setKinds] = useState<Record<ExportKind, boolean>>({
     section2d: true,
     section3d: true,
     tunnel3d: true,
     compare: false,
+    overbreak: true,
+    areaDepth: false,
+    volumeDepth: false,
+    gallery: false,
+    stack: false,
   })
   const [exporting, setExporting] = useState(false)
   const [exportHint, setExportHint] = useState<string | null>(null)
@@ -314,8 +381,14 @@ export function App() {
   const redrawInsets = (frame: PreviewFrame | null, lookNow: Appearance) => {
     const currentMeta = metaRef.current
     if (!currentMeta || !frame) return
-    if (insetRef.current) drawUvInset(insetRef.current, frame, currentMeta.uv_extent, lookNow)
-    if (insetLargeRef.current) drawUvInset(insetLargeRef.current, frame, currentMeta.uv_extent, lookNow)
+    const poly = horseshoePolyline(horseshoeRef.current)
+    const design = {
+      poly,
+      polar: polarSamples(frame.contour_uv, poly, 36),
+      show: overlaysRef.current.horseshoe,
+    }
+    if (insetRef.current) drawUvInset(insetRef.current, frame, currentMeta.uv_extent, lookNow, design)
+    if (insetLargeRef.current) drawUvInset(insetLargeRef.current, frame, currentMeta.uv_extent, lookNow, design)
   }
 
   const paintPreview = () => {
@@ -331,7 +404,9 @@ export function App() {
       smoothWindow: smoothRef.current,
     })
     lastFrameRef.current = frame
-    viewer.applyPreview(frame)
+    const poly = horseshoePolyline(horseshoeRef.current)
+    const stats = overbreakStats(frame.contour_uv, poly)
+    viewer.applyPreview({ ...frame, horseshoe_uv: poly })
     redrawInsets(frame, lookRef.current)
     startTransition(() => {
       setHud({
@@ -339,6 +414,12 @@ export function App() {
         pointCount: frame.pointCount,
         coverage: frame.coverage,
         radius: frame.fit ? frame.fit.radius : null,
+        maxOver: stats.nOver ? stats.maxOver : null,
+        meanOver: stats.nOver ? stats.meanOver : null,
+        maxUnder: stats.nUnder ? stats.maxUnder : null,
+        meanUnder: stats.nUnder ? stats.meanUnder : null,
+        overArea: stats.overArea,
+        underArea: stats.underArea,
       })
     })
   }
@@ -404,6 +485,7 @@ export function App() {
   }, [look, overlays.inset])
 
   useEffect(() => {
+    overlaysRef.current = overlays
     viewerRef.current?.setOverlays(overlays)
     if (!overlays.inset) setInsetOpen(false)
     redrawInsets(lastFrameRef.current, lookRef.current)
@@ -457,7 +539,7 @@ export function App() {
     setLook({ theme, ...THEME_DEFAULTS[theme] })
   }
 
-  const onTint = (key: 'cloud' | 'slice' | 'contour' | 'fit', value: string) => {
+  const onTint = (key: 'cloud' | 'slice' | 'contour' | 'fit' | 'design', value: string) => {
     setLook((prev) => ({ ...prev, [key]: value }))
   }
 
@@ -467,6 +549,14 @@ export function App() {
 
   const onResetLook = () => {
     setLook(defaultAppearance(look.theme))
+  }
+
+  const applyHorseshoe = (next: HorseshoeParams) => {
+    const clamped = clampHorseshoe(next)
+    horseshoeRef.current = clamped
+    setHorseshoe(clamped)
+    saveHorseshoe(clamped)
+    schedulePaint()
   }
 
   const onStationInput = (event: ChangeEvent<HTMLInputElement>) => {
@@ -559,6 +649,7 @@ export function App() {
           smooth_window: smoothRef.current,
         },
         selected,
+        horseshoeRef.current,
         (message) => setExportHint(message),
       )
       setExportUrls((prev) => {
@@ -606,6 +697,7 @@ export function App() {
         bins={bins}
         smooth={smooth}
         overlays={overlays}
+        horseshoe={horseshoe}
         kinds={kinds}
         exporting={exporting}
         exportHint={exportHint}
@@ -622,6 +714,12 @@ export function App() {
         onBrightness={onBrightness}
         onResetLook={onResetLook}
         onOverlays={setOverlays}
+        onHorseshoe={applyHorseshoe}
+        onAlignHorseshoe={() => {
+          const frame = lastFrameRef.current
+          if (!frame?.contour_uv.length) return
+          applyHorseshoe(alignToContour(frame.contour_uv, horseshoeRef.current))
+        }}
         onKinds={setKinds}
         onExport={onExport}
         onOpenPicker={() => fileInputRef.current?.click()}
@@ -701,6 +799,7 @@ function InstrumentRail(props: {
   bins: number
   smooth: number
   overlays: OverlayState
+  horseshoe: HorseshoeParams
   kinds: Record<ExportKind, boolean>
   exporting: boolean
   exportHint: string | null
@@ -713,10 +812,12 @@ function InstrumentRail(props: {
   onBins: (event: ChangeEvent<HTMLInputElement>) => void
   onSmooth: (event: ChangeEvent<HTMLInputElement>) => void
   onTheme: (theme: ThemeId) => void
-  onTint: (key: 'cloud' | 'slice' | 'contour' | 'fit', value: string) => void
+  onTint: (key: 'cloud' | 'slice' | 'contour' | 'fit' | 'design', value: string) => void
   onBrightness: (value: number) => void
   onResetLook: () => void
   onOverlays: Dispatch<SetStateAction<OverlayState>>
+  onHorseshoe: (next: HorseshoeParams) => void
+  onAlignHorseshoe: () => void
   onKinds: Dispatch<SetStateAction<Record<ExportKind, boolean>>>
   onExport: () => void
   onOpenPicker: () => void
@@ -836,6 +937,13 @@ function InstrumentRail(props: {
         <OverlayToggles look={props.look} overlays={props.overlays} onChange={props.onOverlays} />
       </section>
 
+      <HorseshoePanel
+        params={props.horseshoe}
+        disabled={!props.meta}
+        onChange={props.onHorseshoe}
+        onAlign={props.onAlignHorseshoe}
+      />
+
       <details className="block advanced">
         <summary>颜色</summary>
         <div className="tints">
@@ -845,6 +953,7 @@ function InstrumentRail(props: {
               ['slice', '切片点'],
               ['contour', '轮廓线'],
               ['fit', '拟合圆'],
+              ['design', '设计马蹄'],
             ] as const
           ).map(([key, label]) => (
             <label key={key} className="tint" htmlFor={`tint-${key}`}>
@@ -891,6 +1000,109 @@ function InstrumentRail(props: {
   )
 }
 
+function HorseshoePanel(props: {
+  params: HorseshoeParams
+  disabled: boolean
+  onChange: (next: HorseshoeParams) => void
+  onAlign: () => void
+}) {
+  const geom = archGeometry(props.params)
+  const area = polygonArea(horseshoePolyline(props.params))
+  const height = horseshoeHeight(props.params)
+  const set = (patch: Partial<HorseshoeParams>) => props.onChange({ ...props.params, ...patch })
+  return (
+    <details className="block advanced" open>
+      <summary>设计马蹄形</summary>
+      <p className="hint">直墙 + 圆弧拱，形状对齐 docs 断面图。数值可改，用于超欠挖 Δd。</p>
+      <label htmlFor="hs-width">
+        全宽
+        <input
+          id="hs-width"
+          type="number"
+          min={0.6}
+          max={12}
+          step={0.05}
+          disabled={props.disabled}
+          value={props.params.width.toFixed(2)}
+          onChange={(event) => set({ width: Number(event.target.value) })}
+        />
+      </label>
+      <label htmlFor="hs-wall">
+        直墙高
+        <input
+          id="hs-wall"
+          type="number"
+          min={0.2}
+          max={8}
+          step={0.05}
+          disabled={props.disabled}
+          value={props.params.wallHeight.toFixed(2)}
+          onChange={(event) => set({ wallHeight: Number(event.target.value) })}
+        />
+      </label>
+      <label htmlFor="hs-radius">
+        拱半径
+        <input
+          id="hs-radius"
+          type="number"
+          min={0.4}
+          max={16}
+          step={0.05}
+          disabled={props.disabled}
+          value={props.params.archRadius.toFixed(2)}
+          onChange={(event) => set({ archRadius: Number(event.target.value) })}
+        />
+      </label>
+      <label htmlFor="hs-u">
+        横向偏移 u
+        <input
+          id="hs-u"
+          type="number"
+          min={-8}
+          max={8}
+          step={0.02}
+          disabled={props.disabled}
+          value={props.params.centerU.toFixed(2)}
+          onChange={(event) => set({ centerU: Number(event.target.value) })}
+        />
+      </label>
+      <label htmlFor="hs-v">
+        底板高 v
+        <input
+          id="hs-v"
+          type="number"
+          min={-8}
+          max={8}
+          step={0.02}
+          disabled={props.disabled}
+          value={props.params.invertV.toFixed(2)}
+          onChange={(event) => set({ invertV: Number(event.target.value) })}
+        />
+      </label>
+      <p className="hint">
+        总高 {height.toFixed(2)} m，拱矢 {geom.rise.toFixed(2)} m，设计面积 {area.toFixed(2)} m²
+      </p>
+      <div className="hs-actions">
+        <button type="button" className="reset-look" disabled={props.disabled} onClick={props.onAlign}>
+          按当前轮廓对齐
+        </button>
+        <button
+          type="button"
+          className="reset-look"
+          disabled={props.disabled}
+          onClick={() =>
+            props.onChange(
+              applyDrawingRatios(props.params.width, props.params.centerU, props.params.invertV),
+            )
+          }
+        >
+          按图纸比例
+        </button>
+      </div>
+    </details>
+  )
+}
+
 function OverlayToggles(props: {
   look: Appearance
   overlays: OverlayState
@@ -900,6 +1112,7 @@ function OverlayToggles(props: {
     { key: 'slab', label: '切片点', swatch: props.look.slice },
     { key: 'contour', label: '内壁轮廓', swatch: props.look.contour },
     { key: 'fit', label: '拟合圆', swatch: props.look.fit },
+    { key: 'horseshoe', label: '设计马蹄', swatch: props.look.design },
     { key: 'inset', label: '断面图' },
   ]
   return (
@@ -1037,6 +1250,30 @@ function ViewportHud(props: { hud: HudState | null }) {
       <div>
         <dt>拟合半径</dt>
         <dd>{props.hud.radius === null ? '—' : formatMeters(props.hud.radius)}</dd>
+      </div>
+      <div>
+        <dt>最大超挖</dt>
+        <dd>{props.hud.maxOver === null ? '—' : formatMeters(props.hud.maxOver, 3)}</dd>
+      </div>
+      <div>
+        <dt>平均超挖</dt>
+        <dd>{props.hud.meanOver === null ? '—' : formatMeters(props.hud.meanOver, 3)}</dd>
+      </div>
+      <div>
+        <dt>最大欠挖</dt>
+        <dd>{props.hud.maxUnder === null ? '—' : formatMeters(props.hud.maxUnder, 3)}</dd>
+      </div>
+      <div>
+        <dt>平均欠挖</dt>
+        <dd>{props.hud.meanUnder === null ? '—' : formatMeters(props.hud.meanUnder, 3)}</dd>
+      </div>
+      <div>
+        <dt>超挖面积</dt>
+        <dd>{props.hud.overArea === null ? '—' : `${props.hud.overArea.toFixed(3)} m²`}</dd>
+      </div>
+      <div>
+        <dt>欠挖面积</dt>
+        <dd>{props.hud.underArea === null ? '—' : `${props.hud.underArea.toFixed(3)} m²`}</dd>
       </div>
     </dl>
   )

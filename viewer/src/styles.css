@@ -234,10 +234,11 @@ a:focus-visible {
   color: var(--paper);
 }
 
-.hint {
-  margin: 0;
-  color: var(--dust);
-  font-size: 0.75rem;
+.hs-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.35rem;
 }
 
 .readout {

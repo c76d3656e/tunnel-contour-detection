@@ -41,7 +41,16 @@ export interface SliceParams {
   smooth_window: number
 }
 
-export type ExportKind = 'section2d' | 'section3d' | 'tunnel3d' | 'compare'
+export type ExportKind =
+  | 'section2d'
+  | 'section3d'
+  | 'tunnel3d'
+  | 'compare'
+  | 'areaDepth'
+  | 'volumeDepth'
+  | 'gallery'
+  | 'stack'
+  | 'overbreak'
 
 export interface SliceResult {
   s: number

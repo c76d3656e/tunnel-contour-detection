@@ -1,6 +1,7 @@
 import { DEFAULT_METHOD, DISPLAY_FRAME, METHODS, type ExportKind, type Meta, type SliceParams } from './types'
 import { flattenContour, overviewWorld, transferList, type PackedExport } from './exportPack'
 import { denseStationRange, frame, percentileAbs, principalAxis } from './geometry'
+import { horseshoePolyline, overbreakStats, polarSamples, polygonArea, type HorseshoeParams } from './horseshoe'
 import { parseLas } from './lasParse'
 import { LiveSlicer } from './liveSlice'
 
@@ -9,7 +10,7 @@ const EXPORT_CAP = 80000
 
 type InMessage =
   | { type: 'open'; name: string; buffer: ArrayBuffer }
-  | { type: 'export'; params: SliceParams; kinds: ExportKind[] }
+  | { type: 'export'; params: SliceParams; kinds: ExportKind[]; horseshoe: HorseshoeParams }
 
 let full: Float32Array | null = null
 let viz: Float32Array | null = null
@@ -142,6 +143,41 @@ self.onmessage = async (event: MessageEvent<InMessage>) => {
             }
           })
         : []
+      const designPoly = horseshoePolyline(data.horseshoe)
+      const polar = polarSamples(frame.contour_uv, designPoly, 36)
+      const samples = new Float64Array(polar.length * 3)
+      for (let i = 0; i < polar.length; i += 1) {
+        samples[i * 3] = polar[i].u
+        samples[i * 3 + 1] = polar[i].v
+        samples[i * 3 + 2] = polar[i].delta
+      }
+      const wantProfile = data.kinds.some((kind) =>
+        kind === 'areaDepth' || kind === 'volumeDepth' || kind === 'gallery' || kind === 'stack',
+      )
+      const lo = meta.dense_s_min ?? meta.s_min
+      const hi = meta.dense_s_max ?? meta.s_max
+      const nProf = wantProfile ? 24 : 0
+      const stations = new Float64Array(nProf)
+      const areas = new Float64Array(nProf)
+      const volumes = new Float64Array(nProf)
+      const gallery: { s: number; contour: Float64Array }[] = []
+      for (let i = 0; i < nProf; i += 1) {
+        const s = nProf <= 1 ? lo : lo + (hi - lo) * (i / (nProf - 1))
+        const item = slicer.sample({
+          s,
+          thickness: params.thickness,
+          method: params.method,
+          bins: params.contour_bins,
+          smoothWindow: params.smooth_window,
+        })
+        stations[i] = s
+        areas[i] = polygonArea(item.contour_uv)
+        if (i === 0) volumes[i] = 0
+        else volumes[i] = volumes[i - 1] + 0.5 * (areas[i] + areas[i - 1]) * (stations[i] - stations[i - 1])
+        if (data.kinds.includes('gallery') || data.kinds.includes('stack')) {
+          gallery.push({ s, contour: flattenContour(item.contour_uv) })
+        }
+      }
       const pack: PackedExport = {
         kinds: data.kinds,
         thickness: params.thickness,
@@ -157,6 +193,13 @@ self.onmessage = async (event: MessageEvent<InMessage>) => {
         fit: frame.fit,
         overview: overviewWorld(viz, meta.origin, meta.axis, meta.u, meta.v_up),
         compare,
+        design: flattenContour(designPoly),
+        stations,
+        areas,
+        volumes,
+        gallery,
+        samples,
+        stats: overbreakStats(frame.contour_uv, designPoly),
       }
       self.postMessage({ type: 'packed', pack }, { transfer: transferList(pack) })
     }

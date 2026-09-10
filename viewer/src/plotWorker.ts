@@ -41,6 +41,12 @@ def render_figures(kinds, thickness, station, fit, methods):
     overview = _xyz("/tmp/overview.bin")
     origin = _f8("/tmp/origin.bin")
     axis = _f8("/tmp/axis.bin")
+    design = _xy("/tmp/design.bin")
+    stations = _f8("/tmp/stations.bin")
+    areas = _f8("/tmp/areas.bin")
+    volumes = _f8("/tmp/volumes.bin")
+    samples = _xyz("/tmp/samples.bin")
+    stats = json.loads(Path("/tmp/stats.json").read_text() or "null")
     files = {}
     if "section2d" in kinds:
         path = Path("/tmp/section_2d.png")
@@ -68,6 +74,37 @@ def render_figures(kinds, thickness, station, fit, methods):
         path = Path("/tmp/methods.png")
         save_contour_comparison(path, u, v, results)
         files["compare"] = str(path)
+    if "overbreak" in kinds:
+        path = Path("/tmp/overbreak.png")
+        save_overbreak_plot(path, contour, design, samples, stats)
+        files["overbreak"] = str(path)
+    if "areaDepth" in kinds:
+        path = Path("/tmp/area_depth.png")
+        save_area_depth_plot(path, stations, areas)
+        files["areaDepth"] = str(path)
+    if "volumeDepth" in kinds:
+        path = Path("/tmp/volume_depth.png")
+        save_volume_depth_plot(path, stations, volumes)
+        files["volumeDepth"] = str(path)
+    if "gallery" in kinds or "stack" in kinds:
+        n = int(Path("/tmp/gallery_n.txt").read_text() or "0")
+        sections = []
+        rings = []
+        for i in range(n):
+            s_i = float(Path(f"/tmp/gallery_{i}_s.txt").read_text())
+            c_i = _xy(f"/tmp/gallery_{i}.bin")
+            sections.append((s_i, c_i, design))
+            if len(c_i):
+                ring = np.column_stack((c_i[:, 0], np.full(len(c_i), s_i), c_i[:, 1]))
+                rings.append(ring)
+        if "gallery" in kinds:
+            path = Path("/tmp/gallery.png")
+            save_contour_gallery(path, sections)
+            files["gallery"] = str(path)
+        if "stack" in kinds:
+            path = Path("/tmp/stack.png")
+            save_contour_stack_plot(path, rings)
+            files["stack"] = str(path)
     return files
 `
 
@@ -137,6 +174,29 @@ self.onmessage = async (event: MessageEvent<{ type: 'init' } | { type: 'plot'; p
     writeF64(runtime, '/tmp/overview.bin', pack.overview)
     writeF64(runtime, '/tmp/origin.bin', pack.origin)
     writeF64(runtime, '/tmp/axis.bin', pack.axis)
+    writeF64(runtime, '/tmp/design.bin', pack.design)
+    writeF64(runtime, '/tmp/stations.bin', pack.stations)
+    writeF64(runtime, '/tmp/areas.bin', pack.areas)
+    writeF64(runtime, '/tmp/volumes.bin', pack.volumes)
+    writeF64(runtime, '/tmp/samples.bin', pack.samples)
+    runtime.FS.writeFile(
+      '/tmp/stats.json',
+      pack.stats
+        ? JSON.stringify({
+            max_over: pack.stats.maxOver,
+            mean_over: pack.stats.meanOver,
+            max_under: pack.stats.maxUnder,
+            mean_under: pack.stats.meanUnder,
+            over_area: pack.stats.overArea,
+            under_area: pack.stats.underArea,
+          })
+        : 'null',
+    )
+    runtime.FS.writeFile('/tmp/gallery_n.txt', String(pack.gallery.length))
+    pack.gallery.forEach((item, index) => {
+      writeF64(runtime, `/tmp/gallery_${index}.bin`, item.contour)
+      runtime.FS.writeFile(`/tmp/gallery_${index}_s.txt`, String(item.s))
+    })
     for (const item of pack.compare) {
       writeF64(runtime, `/tmp/contour_${item.method}.bin`, item.contour)
       runtime.FS.writeFile(`/tmp/cov_${item.method}.txt`, String(item.coverage))

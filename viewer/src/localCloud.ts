@@ -1,4 +1,5 @@
 import type { ExportKind, ExportResult, Health, Meta, SliceParams } from './types'
+import type { HorseshoeParams } from './horseshoe'
 import { transferList, type PackedExport } from './exportPack'
 
 interface WorkerReady {
@@ -117,6 +118,7 @@ export class LocalCloud {
   async export(
     params: SliceParams,
     kinds: ExportKind[],
+    horseshoe: HorseshoeParams,
     onProgress?: (message: string) => void,
   ): Promise<ExportResult> {
     this.plotProgress = onProgress ?? null
@@ -124,7 +126,7 @@ export class LocalCloud {
       const worker = this.ensureWorker()
       const packed = await new Promise<WorkerReady | WorkerPacked>((resolve, reject) => {
         this.pendingCloud = { resolve, reject }
-        worker.postMessage({ type: 'export', params, kinds })
+        worker.postMessage({ type: 'export', params, kinds, horseshoe })
       })
       if (packed.type !== 'packed') throw new Error('切片数据准备失败')
       this.plotProgress?.('正在用 matplotlib 出图')
