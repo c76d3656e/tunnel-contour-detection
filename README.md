@@ -4,28 +4,41 @@
 
 坐标单位与 LAS 一致。当前示例 `490.las` 为局部米制坐标：断面大约 3 m 宽、2.5 m 高，轴线长约 32 m。程序不做额外缩放。
 
+## 文档
+
+需求说明和设计断面图在 `docs/`：
+
+- [`docs/功能说明.docx`](docs/功能说明.docx)：面积–深度、体积、超欠挖等目标功能
+- [`docs/巷道设计断面.png`](docs/巷道设计断面.png)：设计轮廓与尺寸（毫米）
+
+交互三维页用来看点云和当前剖面；批量 `process` / `render` 仍走 Python。面积、体积、超欠挖统计还没做进程序，以该说明为准。
+
 ## 安装
 
-需要 Python 3.11+ 和 [uv](https://docs.astral.sh/uv/)。
+需要 Python 3.11+、[uv](https://docs.astral.sh/uv/)，以及 Node.js 18+（只为编译 `viewer/`）。
 
 ```powershell
 cd C:\Users\Administrator\Desktop\pc
 uv sync
+cd viewer
+npm install
+npm run build
+cd ..
 ```
 
-之后一律用 `uv run tunnel-pc ...`。命令入口是 `tunnel_pc.cli`。交互三维页在 `viewer/`，点云在**浏览器本机**解码，不经过 Python。
+之后一律用 `uv run tunnel-pc ...`。命令入口是 `tunnel_pc.cli`。
 
 ## 交互三维（推荐先看这个）
 
 点云在显示坐标系里被放平：横向为 X，重力向上为 Y（平底在下），沿轴线为 Z。真实隧道可以上坡下坡，画面里始终水平，平底朝下。
 
-解码 LAS、估计轴线、切片轮廓都在浏览器 Worker 里完成。导出 PNG 在另一个 Worker 里用 **Pyodide + matplotlib Agg** 直接跑 `tunnel_pc/plotting.py`（`matplotlib.use("Agg")`），图例、等比例、三维投影和原先 Python 出图同一套。首次导出要拉几十 MB WASM/wheel。页面可以放到 Vercel 当静态站，**点云文件不会上传到任何服务器**。
+打开本地未压缩 `.las` 后，解码、估计轴线、切片和轮廓都在浏览器 Worker 里完成，**文件不会上传**。页面可放到 Vercel 当静态站。目前不解码 `.laz`，请先解成 `.las`。
+
+右上角断面图是科研坐标风格：以拟合圆心为中心，标题为当前桩号 `s`。点击小窗放大，点空白处或按 Esc 关闭。
+
+导出 PNG 在另一个 Worker 里用 **Pyodide + matplotlib Agg** 直接跑 `tunnel_pc/plotting.py`（`matplotlib.use("Agg")`）。图例、等比例、三维投影和原先 Python 出图同一套。首次导出要拉几十 MB WASM/wheel，之后会缓存在浏览器里。
 
 ```powershell
-cd C:\Users\Administrator\Desktop\pc\viewer
-npm install
-npm run build
-cd ..
 uv run tunnel-pc view --port 8765
 ```
 
@@ -36,9 +49,7 @@ cd C:\Users\Administrator\Desktop\pc\viewer
 npm run dev
 ```
 
-浏览器打开 `http://127.0.0.1:8765` 或 Vite 的 `http://127.0.0.1:5173`，用左侧「打开 LAS」选本地未压缩 `.las`（例如 `490.las`）。拖动桩号看轮廓。导出当前剖面会在浏览器里用 **Pyodide + matplotlib（Agg）** 跑 `tunnel_pc/plotting.py`，图和原先 Python 出图同一套。首次导出要下载几十 MB 的 WASM/wheel，之后会缓存在浏览器里。
-
-目前不解码 `.laz`，请先解成 `.las`。
+浏览器打开 `http://127.0.0.1:8765` 或 Vite 的 `http://127.0.0.1:5173`，用左侧「打开 LAS」选文件（例如 `490.las`）。拖动底栏桩号看轮廓。
 
 ## 推荐工作流
 
