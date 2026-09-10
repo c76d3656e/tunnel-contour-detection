@@ -1,4 +1,4 @@
-import type { Fit } from './api'
+import type { Fit } from './types'
 
 const CIRCLE_SEGS = 96
 const SLAB_CAP = 16000
@@ -155,7 +155,7 @@ function wrapMedian(radial: Float64Array, bins: number, window: number): void {
   radial.set(next)
 }
 
-function radiusKeep(u: Float64Array, v: Float64Array, n: number): number {
+function radiusKeep(u: Float64Array, v: Float64Array, z: Float64Array, n: number): number {
   const radius = 0.08
   const minNeighbors = 3
   const inv = 1 / radius
@@ -201,6 +201,7 @@ function radiusKeep(u: Float64Array, v: Float64Array, n: number): number {
     if (!keep[i]) continue
     u[w] = u[i]
     v[w] = v[i]
+    z[w] = z[i]
     w += 1
   }
   return w
@@ -281,8 +282,10 @@ function fitCircle(us: Float64Array, vs: Float64Array, n: number): Fit | null {
 
 export class LiveSlicer {
   private xyz: Float32Array
-  private u = new Float64Array(SLAB_CAP)
-  private v = new Float64Array(SLAB_CAP)
+  private cap: number
+  private u: Float64Array
+  private v: Float64Array
+  private z: Float64Array
   private radial = new Float64Array(720)
   private buckets: number[][] = Array.from({ length: 720 }, () => [])
   private contourScratch: number[][] = Array.from({ length: 720 }, () => [0, 0])
@@ -298,8 +301,12 @@ export class LiveSlicer {
     slab: [],
   }
 
-  constructor(xyz: Float32Array) {
+  constructor(xyz: Float32Array, cap = SLAB_CAP) {
     this.xyz = xyz
+    this.cap = Math.max(256, cap)
+    this.u = new Float64Array(this.cap)
+    this.v = new Float64Array(this.cap)
+    this.z = new Float64Array(this.cap)
   }
 
   sample(opts: SliceOptions): PreviewFrame {
@@ -307,23 +314,28 @@ export class LiveSlicer {
     const i0 = lowerBoundZ(this.xyz, opts.s - half)
     const i1 = upperBoundZ(this.xyz, opts.s + half)
     const rawCount = i1 - i0
-    if (rawCount <= 0) return { ...this.empty, s: opts.s }
+    if (rawCount <= 0) {
+      this.lastN = 0
+      return { ...this.empty, s: opts.s }
+    }
 
-    const stride = rawCount > SLAB_CAP ? Math.ceil(rawCount / SLAB_CAP) : 1
+    const stride = rawCount > this.cap ? Math.ceil(rawCount / this.cap) : 1
     let n = 0
-    for (let i = i0; i < i1 && n < SLAB_CAP; i += stride) {
+    for (let i = i0; i < i1 && n < this.cap; i += stride) {
       this.u[n] = this.xyz[i * 3]
       this.v[n] = this.xyz[i * 3 + 1]
+      this.z[n] = this.xyz[i * 3 + 2]
       n += 1
     }
 
     if (opts.method === 'radius' || opts.method === 'robust' || opts.method === 'spline') {
-      n = radiusKeep(this.u, this.v, n)
+      n = radiusKeep(this.u, this.v, this.z, n)
     }
 
     const bins = Math.max(12, Math.min(720, opts.bins | 0))
     const contour = this.polarEnvelope(n, bins, opts.method, opts.smoothWindow)
     const fit = contour.length >= 3 ? this.fitFromContour(contour) : null
+    this.lastN = n
     return {
       s: opts.s,
       pointCount: rawCount,
@@ -335,7 +347,17 @@ export class LiveSlicer {
     }
   }
 
+  takeSlab(): { u: Float64Array; v: Float64Array; z: Float64Array } {
+    const n = this.lastN
+    return {
+      u: this.u.slice(0, n),
+      v: this.v.slice(0, n),
+      z: this.z.slice(0, n),
+    }
+  }
+
   private lastCoverage = 0
+  private lastN = 0
 
   private polarEnvelope(n: number, bins: number, method: string, smoothWindow: number): number[][] {
     if (n === 0) {

@@ -9,15 +9,13 @@ import {
   type SetStateAction,
 } from 'react'
 import {
-  fetchCloud,
-  fetchExport,
-  fetchMeta,
-  pollHealth,
-  uploadCloud,
+  LocalCloud,
+} from './localCloud'
+import {
   type ExportKind,
   type Health,
   type Meta,
-} from './api'
+} from './types'
 import { LiveSlicer, type PreviewFrame } from './liveSlice'
 import {
   applyThemeClass,
@@ -180,12 +178,12 @@ export function App() {
   const lastFrameRef = useRef<PreviewFrame | null>(null)
   const lookRef = useRef<Appearance>(loadAppearance())
 
-  const [health, setHealth] = useState<Health>({ status: 'loading', message: '正在连接' })
+  const [health, setHealth] = useState<Health>({ status: 'idle', message: '打开一卷 LAS 点云' })
   const [error, setError] = useState<string | null>(null)
   const [meta, setMeta] = useState<Meta | null>(null)
   const [swapBusy, setSwapBusy] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
-  const reloadRef = useRef<() => Promise<void>>(async () => {})
+  const cloudRef = useRef(new LocalCloud())
   const [look, setLook] = useState<Appearance>(() => lookRef.current)
   const [method, setMethod] = useState('hampel')
   const [bins, setBins] = useState(DEFAULT_BINS)
@@ -204,6 +202,7 @@ export function App() {
     compare: false,
   })
   const [exporting, setExporting] = useState(false)
+  const [exportHint, setExportHint] = useState<string | null>(null)
   const [exportError, setExportError] = useState<string | null>(null)
   const [exportUrls, setExportUrls] = useState<Partial<Record<ExportKind, string>> | null>(null)
 
@@ -267,56 +266,15 @@ export function App() {
     if (!canvas) return
     let cancelled = false
     let viewer: InstanceType<typeof import('./viewer/TunnelViewer').TunnelViewer> | null = null
-    let generation = 0
-
-    const reloadCloud = async () => {
-      const gen = ++generation
-      const healthNow = await pollHealth((next) => {
-        if (!cancelled && gen === generation) setHealth(next)
-      })
-      if (cancelled || gen !== generation) return
-      if (healthNow.status !== 'ready') {
-        if (!metaRef.current) setMeta(null)
-        return
-      }
-      const nextMeta = await fetchMeta()
-      if (cancelled || gen !== generation) return
-      const methodName = nextMeta.default_method || methodRef.current || 'hampel'
-      methodRef.current = methodName
-      const cloud = await fetchCloud(nextMeta.cloud_url)
-      if (cancelled || gen !== generation) return
-      const station = defaultStation(nextMeta)
-      metaRef.current = nextMeta
-      sRef.current = station
-      slicerRef.current = new LiveSlicer(cloud)
-      lastFrameRef.current = null
-      setMeta(nextMeta)
-      setMethod(methodName)
-      setExportUrls(null)
-      setError(null)
-      const currentViewer = viewerRef.current
-      if (!currentViewer) return
-      await currentViewer.loadCloud(cloud, nextMeta, station)
-      if (cancelled || gen !== generation) return
-      currentViewer.setAppearance(lookRef.current)
-      currentViewer.setThickness(thicknessRef.current)
-      if (sLiveRef.current) sLiveRef.current.textContent = formatMeters(station)
-      if (thickLiveRef.current) thickLiveRef.current.textContent = formatMeters(thicknessRef.current)
-      paintPreview()
-    }
-    reloadRef.current = () =>
-      reloadCloud().catch((err: unknown) => {
-        if (!cancelled) setError(err instanceof Error ? err.message : '无法装入点云')
-      })
 
     ;(async () => {
       const { TunnelViewer } = await import('./viewer/TunnelViewer')
       if (cancelled) return
       viewer = new TunnelViewer(canvas)
       viewerRef.current = viewer
-      await reloadCloud()
+      viewer.setAppearance(lookRef.current)
     })().catch((err: unknown) => {
-      if (!cancelled) setError(err instanceof Error ? err.message : '无法装入点云')
+      if (!cancelled) setError(err instanceof Error ? err.message : '无法创建三维视口')
     })
 
     return () => {
@@ -324,6 +282,7 @@ export function App() {
       if (paintRaf.current) window.cancelAnimationFrame(paintRaf.current)
       viewer?.dispose()
       viewerRef.current = null
+      cloudRef.current.dispose()
     }
   }, [])
 
@@ -418,12 +377,35 @@ export function App() {
     setSwapBusy(true)
     setError(null)
     setExportError(null)
-    setHealth({ status: 'loading', message: `正在接收 ${file.name}`, source_name: file.name })
+    setHealth({ status: 'loading', message: `正在读入 ${file.name}`, source_name: file.name })
     try {
-      await uploadCloud(file)
-      await reloadRef.current()
+      const loaded = await cloudRef.current.open(file, setHealth)
+      const nextMeta = loaded.meta
+      const methodName = nextMeta.default_method || methodRef.current || 'hampel'
+      methodRef.current = methodName
+      const station = defaultStation(nextMeta)
+      metaRef.current = nextMeta
+      sRef.current = station
+      slicerRef.current = new LiveSlicer(loaded.viz)
+      lastFrameRef.current = null
+      setMeta(nextMeta)
+      setMethod(methodName)
+      setExportUrls((prev) => {
+        if (prev) for (const url of Object.values(prev)) URL.revokeObjectURL(url)
+        return null
+      })
+      setHealth({ status: 'ready', message: 'ready', source_name: nextMeta.source_name })
+      const currentViewer = viewerRef.current
+      if (!currentViewer) throw new Error('三维视口还没准备好')
+      await currentViewer.loadCloud(loaded.viz, nextMeta, station)
+      currentViewer.setAppearance(lookRef.current)
+      currentViewer.setThickness(thicknessRef.current)
+      if (sLiveRef.current) sLiveRef.current.textContent = formatMeters(station)
+      if (thickLiveRef.current) thickLiveRef.current.textContent = formatMeters(thicknessRef.current)
+      paintPreview()
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : '无法装入点云')
+      setHealth((prev) => ({ ...prev, status: 'error' }))
     } finally {
       setSwapBusy(false)
     }
@@ -443,20 +425,28 @@ export function App() {
     }
     setExporting(true)
     setExportError(null)
+    setExportHint('正在准备剖面')
     try {
-      const result = await fetchExport({
-        s: sRef.current,
-        thickness: thicknessRef.current,
-        method: methodRef.current,
-        contour_bins: binsRef.current,
-        smooth_window: smoothRef.current,
-        kinds: selected,
+      const result = await cloudRef.current.export(
+        {
+          s: sRef.current,
+          thickness: thicknessRef.current,
+          method: methodRef.current,
+          contour_bins: binsRef.current,
+          smooth_window: smoothRef.current,
+        },
+        selected,
+        (message) => setExportHint(message),
+      )
+      setExportUrls((prev) => {
+        if (prev) for (const url of Object.values(prev)) URL.revokeObjectURL(url)
+        return result.urls
       })
-      setExportUrls(result.urls)
     } catch (err: unknown) {
       setExportError(err instanceof Error ? err.message : '导出失败')
     } finally {
       setExporting(false)
+      setExportHint(null)
     }
   }
 
@@ -468,7 +458,7 @@ export function App() {
     : swapBusy || health.status === 'loading'
       ? `正在准备：${health.message}`
       : health.status === 'idle'
-        ? '打开一卷 LAS 或 LAZ 点云。'
+        ? '打开一卷 LAS。解码、放平、切片和出图都在这台电脑上完成。'
         : health.message
 
   return (
@@ -478,7 +468,7 @@ export function App() {
         ref={fileInputRef}
         className="file-input"
         type="file"
-        accept=".las,.laz"
+        accept=".las,.laz,application/octet-stream"
         disabled={swapBusy}
         aria-hidden="true"
         tabIndex={-1}
@@ -495,6 +485,7 @@ export function App() {
         overlays={overlays}
         kinds={kinds}
         exporting={exporting}
+        exportHint={exportHint}
         exportError={exportError}
         exportUrls={exportUrls}
         thickSliderRef={thickSliderRef}
@@ -538,7 +529,7 @@ export function App() {
                   className="file-btn"
                   onClick={() => fileInputRef.current?.click()}
                 >
-                  打开 LAS / LAZ
+                  打开 LAS
                 </button>
               ) : null}
             </div>
@@ -560,6 +551,7 @@ function InstrumentRail(props: {
   overlays: OverlayState
   kinds: Record<ExportKind, boolean>
   exporting: boolean
+  exportHint: string | null
   exportError: string | null
   exportUrls: Partial<Record<ExportKind, string>> | null
   thickSliderRef: RefObject<HTMLInputElement | null>
@@ -602,9 +594,9 @@ function InstrumentRail(props: {
           disabled={props.uploading}
           onClick={props.onOpenPicker}
         >
-          {props.uploading ? '正在读入…' : props.sourceName ? '换一卷 LAS / LAZ' : '打开 LAS / LAZ'}
+          {props.uploading ? '正在读入…' : props.sourceName ? '换一卷 LAS' : '打开 LAS'}
         </button>
-        <p className="hint">换卷后按新文件估计轴线，不会沿用上一卷的姿态。</p>
+        <p className="hint">文件只在这台电脑的浏览器里解码，不会传到网上。换卷后按新文件估计轴线。</p>
       </section>
 
       <section className="block">
@@ -736,6 +728,7 @@ function InstrumentRail(props: {
       <ExportPanel
         kinds={props.kinds}
         exporting={props.exporting}
+        exportHint={props.exportHint}
         disabled={props.uploading || !props.meta}
         exportError={props.exportError}
         exportUrls={props.exportUrls}
@@ -780,6 +773,7 @@ function OverlayToggles(props: {
 function ExportPanel(props: {
   kinds: Record<ExportKind, boolean>
   exporting: boolean
+  exportHint: string | null
   disabled: boolean
   exportError: string | null
   exportUrls: Partial<Record<ExportKind, string>> | null
@@ -810,8 +804,12 @@ function ExportPanel(props: {
         onClick={props.onExport}
         disabled={props.exporting || props.disabled}
       >
-        {props.exporting ? '正在出图…' : '导出当前剖面'}
+        {props.exporting ? props.exportHint || '正在出图…' : '导出当前剖面'}
       </button>
+      {props.exporting && props.exportHint ? <p className="hint">{props.exportHint}</p> : null}
+      {!props.exporting ? (
+        <p className="hint">本机 matplotlib（Pyodide Agg）出图，与 Python 同一套 plotting.py。首次需加载 WASM，会慢几秒到十几秒。</p>
+      ) : null}
       {props.exportError ? <p className="fail">{props.exportError}</p> : null}
       {props.exportUrls ? (
         <div className="thumbs">

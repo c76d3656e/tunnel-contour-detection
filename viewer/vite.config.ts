@@ -1,17 +1,21 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
+const pyodideCdn = 'https://cdn.jsdelivr.net/pyodide/v0.27.7/full/pyodide.mjs'
+
 export default defineConfig({
   base: './',
   plugins: [react()],
+  worker: {
+    format: 'es',
+    rollupOptions: {
+      external: [pyodideCdn],
+    },
+  },
   server: {
     port: 5173,
-    proxy: {
-      '/api': {
-        target: 'http://127.0.0.1:8765',
-        changeOrigin: true,
-        timeout: 600000,
-      },
+    fs: {
+      allow: ['..'],
     },
   },
   build: {

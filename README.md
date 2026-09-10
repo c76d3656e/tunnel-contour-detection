@@ -13,35 +13,32 @@ cd C:\Users\Administrator\Desktop\pc
 uv sync
 ```
 
-之后一律用 `uv run tunnel-pc ...`。命令入口是 `tunnel_pc.cli`。交互三维页还需要 Node.js 18+（`viewer/`）。
+之后一律用 `uv run tunnel-pc ...`。命令入口是 `tunnel_pc.cli`。交互三维页在 `viewer/`，点云在**浏览器本机**解码，不经过 Python。
 
 ## 交互三维（推荐先看这个）
 
 点云在显示坐标系里被放平：横向为 X，重力向上为 Y（平底在下），沿轴线为 Z。真实隧道可以上坡下坡，画面里始终水平，平底朝下。
+
+解码 LAS、估计轴线、切片轮廓都在浏览器 Worker 里完成。导出 PNG 在另一个 Worker 里用 **Pyodide + matplotlib Agg** 直接跑 `tunnel_pc/plotting.py`（`matplotlib.use("Agg")`），图例、等比例、三维投影和原先 Python 出图同一套。首次导出要拉几十 MB WASM/wheel。页面可以放到 Vercel 当静态站，**点云文件不会上传到任何服务器**。
 
 ```powershell
 cd C:\Users\Administrator\Desktop\pc\viewer
 npm install
 npm run build
 cd ..
-uv run tunnel-pc view 490.las --output output --port 8765
+uv run tunnel-pc view --port 8765
 ```
 
-开发时也可前后端分开：
+开发时：
 
 ```powershell
-uv run tunnel-pc view 490.las --output output --port 8765 --no-open-browser
-cd viewer
+cd C:\Users\Administrator\Desktop\pc\viewer
 npm run dev
 ```
 
-浏览器打开 `http://127.0.0.1:8765`（打包后）或 Vite 的 `http://127.0.0.1:5173`。左侧「点云卷」可换成自己的 `.las` / `.laz`；换卷后按新文件重估轴线，不会沿用 `490.las` 的姿态。也可以不带文件启动，再在页面里打开：
+浏览器打开 `http://127.0.0.1:8765` 或 Vite 的 `http://127.0.0.1:5173`，用左侧「打开 LAS」选本地未压缩 `.las`（例如 `490.las`）。拖动桩号看轮廓。导出当前剖面会在浏览器里用 **Pyodide + matplotlib（Agg）** 跑 `tunnel_pc/plotting.py`，图和原先 Python 出图同一套。首次导出要下载几十 MB 的 WASM/wheel，之后会缓存在浏览器里。
 
-```powershell
-uv run tunnel-pc view --output output --port 8765
-```
-
-拖动桩号看轮廓和拟合圆，可改算法与厚度；导出按钮会调用 Python 按当前参数重新出图。
+目前不解码 `.laz`，请先解成 `.las`。
 
 ## 推荐工作流
 
