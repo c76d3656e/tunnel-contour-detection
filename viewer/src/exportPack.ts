@@ -45,50 +45,36 @@ export function flattenContour(contour: number[][]): Float64Array {
   return out
 }
 
-export function worldFromDisplay(
-  u: Float64Array,
-  v: Float64Array,
-  s: Float64Array,
-  origin: number[],
-  axis: number[],
-  uAxis: number[],
-  vAxis: number[],
-): Float64Array {
-  const n = u.length
-  const out = new Float64Array(n * 3)
-  for (let i = 0; i < n; i += 1) {
-    const uu = u[i]
-    const vv = v[i]
-    const ss = s[i]
-    out[i * 3] = origin[0] + uu * uAxis[0] + vv * vAxis[0] + ss * axis[0]
-    out[i * 3 + 1] = origin[1] + uu * uAxis[1] + vv * vAxis[1] + ss * axis[1]
-    out[i * 3 + 2] = origin[2] + uu * uAxis[2] + vv * vAxis[2] + ss * axis[2]
-  }
-  return out
-}
-
-export function overviewWorld(
+/** Pack the live display cloud as (u, v, s). 3D figures swizzle this to (u, s, v). */
+export function packOverview(
   viz: Float32Array,
-  origin: number[],
-  axis: number[],
-  uAxis: number[],
-  vAxis: number[],
   limit = 120000,
+  lo?: number,
+  hi?: number,
 ): Float64Array {
   const count = (viz.length / 3) | 0
-  const stride = Math.max(1, Math.ceil(count / limit))
-  const kept = Math.ceil(count / stride)
-  const u = new Float64Array(kept)
-  const v = new Float64Array(kept)
-  const s = new Float64Array(kept)
+  const clipped = lo !== undefined && hi !== undefined
+  const picks: number[] = []
+  for (let i = 0; i < count; i += 1) {
+    if (clipped) {
+      const s = viz[i * 3 + 2]
+      if (s < lo || s > hi) continue
+    }
+    picks.push(i)
+  }
+  const n = picks.length
+  const stride = Math.max(1, Math.ceil(n / limit))
+  const kept = Math.ceil(n / stride)
+  const out = new Float64Array(kept * 3)
   let w = 0
-  for (let i = 0; i < count; i += stride) {
-    u[w] = viz[i * 3]
-    v[w] = viz[i * 3 + 1]
-    s[w] = viz[i * 3 + 2]
+  for (let k = 0; k < n; k += stride) {
+    const i = picks[k]
+    out[w * 3] = viz[i * 3]
+    out[w * 3 + 1] = viz[i * 3 + 1]
+    out[w * 3 + 2] = viz[i * 3 + 2]
     w += 1
   }
-  return worldFromDisplay(u.subarray(0, w), v.subarray(0, w), s.subarray(0, w), origin, axis, uAxis, vAxis)
+  return out.subarray(0, w * 3)
 }
 
 export function transferList(pack: PackedExport): Transferable[] {

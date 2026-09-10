@@ -37,10 +37,11 @@ export const DEFAULT_HORSESHOE: HorseshoeParams = {
   wallHeight: 3.0 * DESIGN_WALL_BY_WIDTH,
   archRadius: 3.0 * DESIGN_RADIUS_BY_WIDTH,
   centerU: 0,
-  invertV: -1.35,
+  invertV: 0,
 }
 
-const STORAGE_KEY = 'tunnel-horseshoe-v1'
+/** v2: the display frame's 0 moved onto the measured floor, so invertV is now relative to it. */
+const STORAGE_KEY = 'tunnel-horseshoe-v2'
 
 export function clampHorseshoe(raw: Partial<HorseshoeParams>): HorseshoeParams {
   const width = clamp(Number(raw.width) || DEFAULT_HORSESHOE.width, 0.6, 12)
@@ -221,17 +222,14 @@ export function polarSamples(contour: number[][], design: number[][], bins = 36)
   return out
 }
 
+/** Fit the design profile to a measured contour; the invert lands on the frame's 0, i.e. the floor datum. */
 export function alignToContour(contour: number[][], previous?: HorseshoeParams): HorseshoeParams {
   if (contour.length < 3) return clampHorseshoe(previous ?? DEFAULT_HORSESHOE)
   let minU = Infinity
   let maxU = -Infinity
-  let minV = Infinity
-  let maxV = -Infinity
   for (const p of contour) {
     if (p[0] < minU) minU = p[0]
     if (p[0] > maxU) maxU = p[0]
-    if (p[1] < minV) minV = p[1]
-    if (p[1] > maxV) maxV = p[1]
   }
   const width = clamp(maxU - minU, 0.8, 12)
   return clampHorseshoe({
@@ -239,7 +237,7 @@ export function alignToContour(contour: number[][], previous?: HorseshoeParams):
     wallHeight: width * DESIGN_WALL_BY_WIDTH,
     archRadius: width * DESIGN_RADIUS_BY_WIDTH,
     centerU: 0.5 * (minU + maxU),
-    invertV: minV,
+    invertV: 0,
   })
 }
 

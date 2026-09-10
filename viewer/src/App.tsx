@@ -5,6 +5,7 @@ import {
   useState,
   type ChangeEvent,
   type Dispatch,
+  type PointerEvent as ReactPointerEvent,
   type RefObject,
   type SetStateAction,
 } from 'react'
@@ -47,6 +48,64 @@ const THICK_MAX = 1
 const DEFAULT_THICKNESS = 0.2
 const DEFAULT_BINS = 180
 const DEFAULT_SMOOTH = 9
+const INSET_SPAN_MIN = 0.2
+const INSET_SPAN_MAX = 15
+/** A drag ending closer than this to the click that follows still counts as a click. */
+const INSET_DRAG_SLOP_MS = 350
+const INSET_SIZE_MIN = 140
+const INSET_SIZE_MAX = 1200
+const INSET_MARGIN = 8
+const INSET_BOX_KEY = 'tunnel-inset-box-v1'
+
+/** null x/y keeps the CSS default corner until the box is dragged for the first time. */
+interface InsetBoxState {
+  x: number | null
+  y: number | null
+  size: number
+}
+
+function defaultInsetSize(): number {
+  return window.innerWidth < 900 ? 156 : 200
+}
+
+function clampBoxToStage(
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  stageW: number,
+  stageH: number,
+): { x: number; y: number } {
+  return {
+    x: clamp(x, INSET_MARGIN, Math.max(INSET_MARGIN, stageW - width - INSET_MARGIN)),
+    y: clamp(y, INSET_MARGIN, Math.max(INSET_MARGIN, stageH - height - INSET_MARGIN)),
+  }
+}
+
+function loadInsetBox(): InsetBoxState {
+  const fallback: InsetBoxState = { x: null, y: null, size: defaultInsetSize() }
+  try {
+    const raw = localStorage.getItem(INSET_BOX_KEY)
+    if (!raw) return fallback
+    const parsed = JSON.parse(raw) as Partial<InsetBoxState>
+    const size = Number(parsed.size)
+    const coord = (value: unknown): number | null =>
+      value === null || value === undefined || !Number.isFinite(Number(value))
+        ? null
+        : Number(value)
+    return {
+      x: coord(parsed.x),
+      y: coord(parsed.y),
+      size: Number.isFinite(size) ? clamp(size, INSET_SIZE_MIN, INSET_SIZE_MAX) : fallback.size,
+    }
+  } catch {
+    return fallback
+  }
+}
+
+function saveInsetBox(box: InsetBoxState): void {
+  localStorage.setItem(INSET_BOX_KEY, JSON.stringify(box))
+}
 
 const METHOD_HINT: Record<string, string> = {
   legacy: '极角包络',
@@ -110,6 +169,17 @@ function defaultStation(meta: Meta): number {
   return lo + (hi - lo) * 0.55
 }
 
+function defaultWorkingRange(meta: Meta): { lo: number; hi: number } {
+  return {
+    lo: meta.dense_s_min ?? meta.s_min,
+    hi: meta.dense_s_max ?? meta.s_max,
+  }
+}
+
+function rangeMinWidth(meta: Meta): number {
+  return Math.min(0.5, Math.max(0.05, (meta.s_max - meta.s_min) * 0.02))
+}
+
 function insetView(slice: PreviewFrame | null, uvExtent: number): { u0: number; v0: number; span: number } {
   const fallback = Math.max(0.8, uvExtent * 0.42)
   if (!slice) return { u0: 0, v0: 0, span: fallback }
@@ -158,11 +228,51 @@ function formatTick(value: number, step: number): string {
   return rounded.toFixed(digits)
 }
 
+interface InsetViewBox {
+  u0: number
+  v0: number
+  span: number
+}
+
+interface InsetLayout {
+  scale: number
+  cx: number
+  cy: number
+}
+
+/** Keep the canvas backing store in step with its on-screen size so text stays crisp. */
+function syncCanvasBacking(canvas: HTMLCanvasElement): void {
+  const rect = canvas.getBoundingClientRect()
+  const cssSize = rect.width > 0 ? rect.width : canvas.clientWidth
+  if (!(cssSize > 0)) return
+  const target = Math.round(clamp(cssSize * (window.devicePixelRatio || 1), 200, 1600))
+  if (canvas.width !== target || canvas.height !== target) {
+    canvas.width = target
+    canvas.height = target
+  }
+}
+
+/** Plot-box layout shared by the drawing code and the zoom/pan handlers. */
+function insetLayout(canvas: HTMLCanvasElement, view: InsetViewBox): InsetLayout {
+  const width = canvas.width
+  const height = canvas.height
+  const unit = width / 360
+  const left = 44 * unit
+  const right = width - 14 * unit
+  const top = 28 * unit
+  const bottom = height - 36 * unit
+  return {
+    scale: Math.min((right - left) / (view.span * 2), (bottom - top) / (view.span * 2)),
+    cx: (left + right) * 0.5,
+    cy: (top + bottom) * 0.5,
+  }
+}
+
 function drawUvInset(
   canvas: HTMLCanvasElement,
   slice: PreviewFrame | null,
-  uvExtent: number,
   look: Appearance,
+  view: InsetViewBox,
   design?: { poly: number[][]; polar: PolarSample[]; show: boolean },
 ): void {
   const ctx = canvas.getContext('2d')
@@ -174,10 +284,7 @@ function drawUvInset(
   const right = width - 14 * unit
   const top = 28 * unit
   const bottom = height - 36 * unit
-  const view = insetView(slice, uvExtent)
-  const scale = Math.min((right - left) / (view.span * 2), (bottom - top) / (view.span * 2))
-  const cx = (left + right) * 0.5
-  const cy = (top + bottom) * 0.5
+  const { scale, cx, cy } = insetLayout(canvas, view)
   const xOf = (u: number) => cx + (u - view.u0) * scale
   const yOf = (v: number) => cy - (v - view.v0) * scale
   const tickCount = width >= 540 ? 7 : 5
@@ -229,7 +336,13 @@ function drawUvInset(
     ctx.lineWidth = 1.35 * unit
     ctx.setLineDash([5 * unit, 3.5 * unit])
     ctx.beginPath()
-    ctx.arc(cx, cy, slice.fit.radius * scale, 0, Math.PI * 2)
+    ctx.arc(
+      xOf(slice.fit.center_x),
+      yOf(slice.fit.center_y),
+      slice.fit.radius * scale,
+      0,
+      Math.PI * 2,
+    )
     ctx.stroke()
     ctx.setLineDash([])
   }
@@ -326,6 +439,8 @@ export function App() {
   const binsRef = useRef(DEFAULT_BINS)
   const smoothRef = useRef(DEFAULT_SMOOTH)
   const metaRef = useRef<Meta | null>(null)
+  const rangeLoRef = useRef(0)
+  const rangeHiRef = useRef(0)
   const sSliderRef = useRef<HTMLInputElement>(null)
   const thickSliderRef = useRef<HTMLInputElement>(null)
   const thickLiveRef = useRef<HTMLSpanElement>(null)
@@ -361,6 +476,7 @@ export function App() {
   })
   const [horseshoe, setHorseshoe] = useState<HorseshoeParams>(() => horseshoeRef.current)
   const [hud, setHud] = useState<HudState | null>(null)
+  const [range, setRange] = useState<{ lo: number; hi: number } | null>(null)
   const [kinds, setKinds] = useState<Record<ExportKind, boolean>>({
     section2d: true,
     section3d: true,
@@ -371,12 +487,26 @@ export function App() {
     volumeDepth: false,
     gallery: false,
     stack: false,
+    // The live inset has its own 下载 button; it is not part of the batch export.
+    liveSection: false,
   })
   const [exporting, setExporting] = useState(false)
   const [exportHint, setExportHint] = useState<string | null>(null)
   const [exportError, setExportError] = useState<string | null>(null)
   const [exportUrls, setExportUrls] = useState<Partial<Record<ExportKind, string>> | null>(null)
   const [insetOpen, setInsetOpen] = useState(false)
+  const [preview, setPreview] = useState<{ url: string; label: string } | null>(null)
+  const insetViewRef = useRef<InsetViewBox | null>(null)
+  const insetDragEndRef = useRef(0)
+  const [insetManual, setInsetManual] = useState(false)
+  const stageRef = useRef<HTMLElement>(null)
+  const insetBoxRef = useRef<HTMLDivElement>(null)
+  const [box, setBox] = useState<InsetBoxState>(loadInsetBox)
+  const [boxDragging, setBoxDragging] = useState(false)
+  const [liveExporting, setLiveExporting] = useState(false)
+  // Mirrored so the drag listeners stay attached across renders without going stale.
+  const boxStateRef = useRef(box)
+  boxStateRef.current = box
 
   const redrawInsets = (frame: PreviewFrame | null, lookNow: Appearance) => {
     const currentMeta = metaRef.current
@@ -387,8 +517,256 @@ export function App() {
       polar: polarSamples(frame.contour_uv, poly, 36),
       show: overlaysRef.current.horseshoe,
     }
-    if (insetRef.current) drawUvInset(insetRef.current, frame, currentMeta.uv_extent, lookNow, design)
-    if (insetLargeRef.current) drawUvInset(insetLargeRef.current, frame, currentMeta.uv_extent, lookNow, design)
+    const view = insetViewRef.current ?? insetView(frame, currentMeta.uv_extent)
+    if (insetRef.current) {
+      syncCanvasBacking(insetRef.current)
+      drawUvInset(insetRef.current, frame, lookNow, view, design)
+    }
+    if (insetLargeRef.current) {
+      drawUvInset(insetLargeRef.current, frame, lookNow, view, design)
+    }
+  }
+
+  const autoInsetView = (frame: PreviewFrame | null): InsetViewBox =>
+    insetView(frame, metaRef.current?.uv_extent ?? 2)
+
+  const resetInsetView = () => {
+    insetViewRef.current = null
+    setInsetManual(false)
+    redrawInsets(lastFrameRef.current, lookRef.current)
+  }
+
+  /**
+   * Wheel zooms about the cursor and both canvases share one view box. Only the
+   * enlarged dialog pans by dragging; in the small box a drag moves the box itself.
+   */
+  const attachInsetControls = (canvas: HTMLCanvasElement, pan: boolean): (() => void) => {
+    const viewNow = () => insetViewRef.current ?? autoInsetView(lastFrameRef.current)
+
+    const canvasPoint = (clientX: number, clientY: number): [number, number] | null => {
+      const rect = canvas.getBoundingClientRect()
+      if (rect.width <= 0 || rect.height <= 0) return null
+      return [
+        ((clientX - rect.left) / rect.width) * canvas.width,
+        ((clientY - rect.top) / rect.height) * canvas.height,
+      ]
+    }
+
+    const applyInsetView = (next: InsetViewBox) => {
+      if (!lastFrameRef.current) return
+      insetViewRef.current = next
+      setInsetManual(true)
+      redrawInsets(lastFrameRef.current, lookRef.current)
+    }
+
+    const onWheel = (event: WheelEvent) => {
+      const point = canvasPoint(event.clientX, event.clientY)
+      if (!point) return
+      const view = viewNow()
+      const layout = insetLayout(canvas, view)
+      if (!(layout.scale > 0)) return
+      event.preventDefault()
+      const anchorU = view.u0 + (point[0] - layout.cx) / layout.scale
+      const anchorV = view.v0 - (point[1] - layout.cy) / layout.scale
+      const span = clamp(
+        view.span * Math.exp(event.deltaY * 0.0015),
+        INSET_SPAN_MIN,
+        INSET_SPAN_MAX,
+      )
+      const ratio = span / view.span
+      applyInsetView({
+        u0: anchorU - (anchorU - view.u0) * ratio,
+        v0: anchorV - (anchorV - view.v0) * ratio,
+        span,
+      })
+    }
+
+    let drag: { id: number; startX: number; startY: number; view: InsetViewBox; moved: boolean } | null =
+      null
+
+    /** Capture is best-effort: it throws for a pointer that is no longer active. */
+    const capture = (pointerId: number, on: boolean) => {
+      try {
+        if (on) canvas.setPointerCapture(pointerId)
+        else if (canvas.hasPointerCapture(pointerId)) canvas.releasePointerCapture(pointerId)
+      } catch {
+        /* the drag still tracks through move events without capture */
+      }
+    }
+
+    const onPointerDown = (event: PointerEvent) => {
+      if (!pan) return
+      if (event.pointerType === 'mouse' && event.button !== 0) return
+      drag = {
+        id: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        view: viewNow(),
+        moved: false,
+      }
+      capture(event.pointerId, true)
+    }
+
+    const onPointerMove = (event: PointerEvent) => {
+      if (!drag || event.pointerId !== drag.id) return
+      const from = canvasPoint(drag.startX, drag.startY)
+      const to = canvasPoint(event.clientX, event.clientY)
+      if (!from || !to) return
+      const dx = to[0] - from[0]
+      const dy = to[1] - from[1]
+      if (!drag.moved && Math.hypot(dx, dy) < 3) return
+      const layout = insetLayout(canvas, drag.view)
+      if (!(layout.scale > 0)) return
+      drag.moved = true
+      canvas.classList.add('is-dragging')
+      applyInsetView({
+        u0: drag.view.u0 - dx / layout.scale,
+        v0: drag.view.v0 + dy / layout.scale,
+        span: drag.view.span,
+      })
+    }
+
+    const onPointerUp = (event: PointerEvent) => {
+      if (!drag || event.pointerId !== drag.id) return
+      const moved = drag.moved
+      drag = null
+      canvas.classList.remove('is-dragging')
+      capture(event.pointerId, false)
+      if (moved) insetDragEndRef.current = performance.now()
+    }
+
+    canvas.addEventListener('wheel', onWheel, { passive: false })
+    canvas.addEventListener('pointerdown', onPointerDown)
+    canvas.addEventListener('pointermove', onPointerMove)
+    canvas.addEventListener('pointerup', onPointerUp)
+    canvas.addEventListener('pointercancel', onPointerUp)
+    return () => {
+      canvas.removeEventListener('wheel', onWheel)
+      canvas.removeEventListener('pointerdown', onPointerDown)
+      canvas.removeEventListener('pointermove', onPointerMove)
+      canvas.removeEventListener('pointerup', onPointerUp)
+      canvas.removeEventListener('pointercancel', onPointerUp)
+      canvas.classList.remove('is-dragging')
+    }
+  }
+
+  /** Dragging the frame moves the whole box; the corner grip resizes it. */
+  const attachBoxDrag = (
+    handle: HTMLElement,
+    mode: 'move' | 'resize',
+  ): (() => void) => {
+    const stageNow = () => stageRef.current?.getBoundingClientRect() ?? null
+
+    let active: {
+      id: number
+      startX: number
+      startY: number
+      box: InsetBoxState
+      originX: number
+      originY: number
+      barHeight: number
+    } | null = null
+
+    const measureBarHeight = () => {
+      const rect = insetBoxRef.current?.getBoundingClientRect()
+      const refSize = boxStateRef.current.size
+      return rect && refSize > 0 ? Math.max(0, rect.height - refSize) : 0
+    }
+
+    /** The largest size whose frame still fits inside the stage, grip included. */
+    const maxSizeFor = (stage: DOMRect) => {
+      const bar = measureBarHeight()
+      return Math.max(
+        INSET_SIZE_MIN,
+        Math.min(
+          INSET_SIZE_MAX,
+          stage.width - INSET_MARGIN * 2,
+          stage.height - INSET_MARGIN * 2 - bar,
+        ),
+      )
+    }
+
+    const onPointerDown = (event: PointerEvent) => {
+      if (event.pointerType === 'mouse' && event.button !== 0) return
+      const el = event.target as HTMLElement | null
+      // Bar buttons always keep their own click.
+      if (el?.closest('button')) return
+      // In move mode the grip belongs to the resize gesture, not to moving.
+      if (mode === 'move' && el?.closest('.inset-grip')) return
+      const stage = stageNow()
+      const rect = insetBoxRef.current?.getBoundingClientRect()
+      if (!stage || !rect) return
+      event.preventDefault()
+      event.stopPropagation()
+      active = {
+        id: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        box: boxStateRef.current,
+        originX: rect.left - stage.left,
+        originY: rect.top - stage.top,
+        barHeight: Math.max(0, rect.height - boxStateRef.current.size),
+      }
+      setBoxDragging(true)
+      // Listen on the window so the gesture survives leaving the box or the grip.
+      window.addEventListener('pointermove', onPointerMove)
+      window.addEventListener('pointerup', onPointerUp)
+      window.addEventListener('pointercancel', onPointerUp)
+    }
+
+    const onPointerMove = (event: PointerEvent) => {
+      if (!active || event.pointerId !== active.id) return
+      const stage = stageNow()
+      if (!stage) return
+      event.preventDefault()
+      const dx = event.clientX - active.startX
+      const dy = event.clientY - active.startY
+      if (mode === 'move') {
+        const rect = insetBoxRef.current?.getBoundingClientRect()
+        const next = clampBoxToStage(
+          active.originX + dx,
+          active.originY + dy,
+          rect?.width ?? active.box.size,
+          rect?.height ?? active.box.size,
+          stage.width,
+          stage.height,
+        )
+        setBox({ ...active.box, x: next.x, y: next.y })
+      } else {
+        const size = clamp(
+          Math.round(active.box.size + Math.max(dx, dy)),
+          INSET_SIZE_MIN,
+          maxSizeFor(stage),
+        )
+        // Growing must not push the frame past the stage edge it is already near.
+        const next = clampBoxToStage(
+          active.originX,
+          active.originY,
+          size,
+          size + active.barHeight,
+          stage.width,
+          stage.height,
+        )
+        setBox({ ...active.box, size, x: next.x, y: next.y })
+      }
+    }
+
+    const onPointerUp = (event: PointerEvent) => {
+      if (!active || event.pointerId !== active.id) return
+      active = null
+      setBoxDragging(false)
+      window.removeEventListener('pointermove', onPointerMove)
+      window.removeEventListener('pointerup', onPointerUp)
+      window.removeEventListener('pointercancel', onPointerUp)
+    }
+
+    handle.addEventListener('pointerdown', onPointerDown)
+    return () => {
+      handle.removeEventListener('pointerdown', onPointerDown)
+      window.removeEventListener('pointermove', onPointerMove)
+      window.removeEventListener('pointerup', onPointerUp)
+      window.removeEventListener('pointercancel', onPointerUp)
+    }
   }
 
   const paintPreview = () => {
@@ -432,14 +810,27 @@ export function App() {
     })
   }
 
-  const applyStation = (value: number, fromSlider: boolean) => {
+  const applyStation = (value: number) => {
     const current = metaRef.current
     if (!current) return
-    const next = clamp(value, current.s_min, current.s_max)
+    const next = clamp(value, rangeLoRef.current, rangeHiRef.current)
     sRef.current = next
-    if (!fromSlider && sSliderRef.current) sSliderRef.current.value = String(next)
+    if (sSliderRef.current) sSliderRef.current.value = String(next)
     viewerRef.current?.setStation(next)
     schedulePaint()
+  }
+
+  const applyRange = (lo: number, hi: number) => {
+    const current = metaRef.current
+    if (!current) return
+    const minW = rangeMinWidth(current)
+    const nextLo = clamp(lo, current.s_min, current.s_max - minW)
+    const nextHi = clamp(hi, nextLo + minW, current.s_max)
+    rangeLoRef.current = nextLo
+    rangeHiRef.current = nextHi
+    setRange({ lo: nextLo, hi: nextHi })
+    viewerRef.current?.setWorkingRange(nextLo, nextHi)
+    if (sRef.current < nextLo || sRef.current > nextHi) applyStation(sRef.current)
   }
 
   const applyThickness = (value: number, fromSlider: boolean) => {
@@ -510,6 +901,85 @@ export function App() {
   }, [insetOpen])
 
   useEffect(() => {
+    const disposers: (() => void)[] = []
+    if (overlays.inset) {
+      if (insetRef.current) disposers.push(attachInsetControls(insetRef.current, false))
+      if (insetOpen && insetLargeRef.current) {
+        disposers.push(attachInsetControls(insetLargeRef.current, true))
+      }
+    }
+    return () => {
+      for (const dispose of disposers) dispose()
+    }
+  }, [insetOpen, overlays.inset])
+
+  useEffect(() => {
+    const handle = insetBoxRef.current
+    if (!handle || !overlays.inset) return
+    const disposers = [attachBoxDrag(handle, 'move')]
+    const grip = handle.querySelector<HTMLElement>('.inset-grip')
+    if (grip) disposers.push(attachBoxDrag(grip, 'resize'))
+    return () => {
+      for (const dispose of disposers) dispose()
+    }
+  }, [overlays.inset])
+
+  useEffect(() => {
+    saveInsetBox(box)
+  }, [box])
+
+  // The canvas CSS size changed, so its bitmap has to be re-rendered at the new scale.
+  useEffect(() => {
+    redrawInsets(lastFrameRef.current, lookRef.current)
+  }, [box.size])
+
+  useEffect(() => {
+    const fitToStage = () => {
+      const stage = stageRef.current?.getBoundingClientRect()
+      const rect = insetBoxRef.current?.getBoundingClientRect()
+      if (!stage || !rect) return
+      setBox((prev) => {
+        const bar = Math.max(0, rect.height - prev.size)
+        const size = Math.min(
+          prev.size,
+          Math.max(
+            INSET_SIZE_MIN,
+            Math.min(stage.width - INSET_MARGIN * 2, stage.height - INSET_MARGIN * 2 - bar),
+          ),
+        )
+        if (prev.x === null || prev.y === null) {
+          return size === prev.size ? prev : { ...prev, size }
+        }
+        const next = clampBoxToStage(
+          prev.x,
+          prev.y,
+          size,
+          size + bar,
+          stage.width,
+          stage.height,
+        )
+        if (size === prev.size && next.x === prev.x && next.y === prev.y) return prev
+        return { ...prev, size, ...next }
+      })
+    }
+    fitToStage()
+    window.addEventListener('resize', fitToStage)
+    return () => window.removeEventListener('resize', fitToStage)
+  }, [])
+
+  useEffect(() => {
+    if (!preview) return
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        setPreview(null)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [preview])
+
+  useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       const target = event.target
       const typing =
@@ -525,10 +995,10 @@ export function App() {
       if (typing) return
       if (event.key === 'ArrowLeft') {
         event.preventDefault()
-        applyStation(sRef.current - 0.05, false)
+        applyStation(sRef.current - 0.05)
       } else if (event.key === 'ArrowRight') {
         event.preventDefault()
-        applyStation(sRef.current + 0.05, false)
+        applyStation(sRef.current + 0.05)
       }
     }
     window.addEventListener('keydown', onKey)
@@ -559,8 +1029,45 @@ export function App() {
     schedulePaint()
   }
 
+  /** Re-draw the current station as a standalone 300 dpi figure, then download it. */
+  const onDownloadLiveSection = async () => {
+    if (!metaRef.current || liveExporting) return
+    setLiveExporting(true)
+    setError(null)
+    try {
+      const url = await cloudRef.current.exportLiveSection(
+        currentSliceParams(),
+        horseshoeRef.current,
+        setExportHint,
+      )
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = `section_${sRef.current.toFixed(2)}m.png`
+      document.body.append(anchor)
+      anchor.click()
+      anchor.remove()
+      // Give the browser a moment to start the download before revoking.
+      window.setTimeout(() => URL.revokeObjectURL(url), 60000)
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : '断面图出图失败')
+    } finally {
+      setLiveExporting(false)
+      setExportHint(null)
+    }
+  }
+
+  const currentSliceParams = () => ({
+    s: sRef.current,
+    thickness: thicknessRef.current,
+    method: methodRef.current,
+    contour_bins: binsRef.current,
+    smooth_window: smoothRef.current,
+    range_lo: rangeLoRef.current,
+    range_hi: rangeHiRef.current,
+  })
+
   const onStationInput = (event: ChangeEvent<HTMLInputElement>) => {
-    applyStation(Number(event.currentTarget.value), true)
+    applyStation(Number(event.currentTarget.value))
   }
 
   const onThickInput = (event: ChangeEvent<HTMLInputElement>) => {
@@ -598,11 +1105,17 @@ export function App() {
       const methodName = nextMeta.default_method || methodRef.current || 'hampel'
       methodRef.current = methodName
       const station = defaultStation(nextMeta)
+      const window = defaultWorkingRange(nextMeta)
       metaRef.current = nextMeta
       sRef.current = station
+      rangeLoRef.current = window.lo
+      rangeHiRef.current = window.hi
       slicerRef.current = new LiveSlicer(loaded.viz)
       lastFrameRef.current = null
+      insetViewRef.current = null
+      setInsetManual(false)
       setMeta(nextMeta)
+      setRange(window)
       setMethod(methodName)
       setExportUrls((prev) => {
         if (prev) for (const url of Object.values(prev)) URL.revokeObjectURL(url)
@@ -614,7 +1127,22 @@ export function App() {
       await currentViewer.loadCloud(loaded.viz, nextMeta, station)
       currentViewer.setAppearance(lookRef.current)
       currentViewer.setThickness(thicknessRef.current)
+      currentViewer.setWorkingRange(window.lo, window.hi)
       if (thickLiveRef.current) thickLiveRef.current.textContent = formatMeters(thicknessRef.current)
+      // The frame's 0 now sits on the measured floor, so re-seat the design profile on it.
+      const frameNow = slicerRef.current.sample({
+        s: station,
+        thickness: thicknessRef.current,
+        method: methodName,
+        bins: binsRef.current,
+        smoothWindow: smoothRef.current,
+      })
+      lastFrameRef.current = frameNow
+      if (frameNow.contour_uv.length >= 3) {
+        applyHorseshoe(alignToContour(frameNow.contour_uv, horseshoeRef.current))
+      } else {
+        applyHorseshoe({ ...horseshoeRef.current, invertV: 0 })
+      }
       paintPreview()
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : '无法装入点云')
@@ -641,13 +1169,7 @@ export function App() {
     setExportHint('正在准备剖面')
     try {
       const result = await cloudRef.current.export(
-        {
-          s: sRef.current,
-          thickness: thicknessRef.current,
-          method: methodRef.current,
-          contour_bins: binsRef.current,
-          smooth_window: smoothRef.current,
-        },
+        currentSliceParams(),
         selected,
         horseshoeRef.current,
         (message) => setExportHint(message),
@@ -656,6 +1178,7 @@ export function App() {
         if (prev) for (const url of Object.values(prev)) URL.revokeObjectURL(url)
         return result.urls
       })
+      setPreview(null)
     } catch (err: unknown) {
       setExportError(err instanceof Error ? err.message : '导出失败')
     } finally {
@@ -722,27 +1245,87 @@ export function App() {
         }}
         onKinds={setKinds}
         onExport={onExport}
+        onPreview={(item) => setPreview(item)}
         onOpenPicker={() => fileInputRef.current?.click()}
       />
-      <main className="stage">
+      <main className="stage" ref={stageRef}>
         <canvas ref={canvasRef} className="gl" />
         <ViewportHud hud={hud} />
         <div className="stage-tr">
-          {overlays.inset ? (
-            <button
-              type="button"
-              className="inset-btn"
-              onClick={() => setInsetOpen(true)}
-              title="点击放大"
-              aria-label="放大断面图"
-            >
-              <canvas ref={insetRef} className="inset" width={360} height={360} />
-            </button>
-          ) : null}
           <button type="button" className="home" onClick={() => viewerRef.current?.resetCamera()}>
             归位
           </button>
         </div>
+        {overlays.inset ? (
+          <div
+            ref={insetBoxRef}
+            className={`inset-box${boxDragging ? ' is-dragging' : ''}`}
+            style={{
+              width: box.size,
+              ...(box.x === null || box.y === null
+                ? {}
+                : { left: box.x, top: box.y, right: 'auto' }),
+            }}
+          >
+            <div
+              className="inset-bar"
+              title="按住拖动这个框"
+            >
+              <span className="inset-title">断面图</span>
+              <span className="inset-bar-tools">
+                {insetManual ? (
+                  <button
+                    type="button"
+                    className="inset-tool"
+                    onClick={resetInsetView}
+                    title="回到自动取景"
+                  >
+                    适应
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  className="inset-tool"
+                  onClick={onDownloadLiveSection}
+                  disabled={!meta || liveExporting}
+                  title="按当前桩号重画一张 300 dpi 的断面图"
+                >
+                  {liveExporting ? '出图…' : '下载'}
+                </button>
+                <button
+                  type="button"
+                  className="inset-tool"
+                  onClick={() => setInsetOpen(true)}
+                  title="放大"
+                >
+                  放大
+                </button>
+                {box.x === null ? null : (
+                  <button
+                    type="button"
+                    className="inset-tool"
+                    onClick={() => setBox((prev) => ({ ...prev, x: null, y: null }))}
+                    title="停靠回右上角"
+                  >
+                    停靠
+                  </button>
+                )}
+              </span>
+            </div>
+            <canvas
+              ref={insetRef}
+              className="inset"
+              width={360}
+              height={360}
+              style={{ width: box.size, height: box.size }}
+              onDoubleClick={() => {
+                if (performance.now() - insetDragEndRef.current < INSET_DRAG_SLOP_MS) return
+                setInsetOpen(true)
+              }}
+            />
+            <span className="inset-grip" title="拖动改大小" />
+          </div>
+        ) : null}
         {insetOpen && overlays.inset ? (
           <div
             className="inset-lightbox"
@@ -754,19 +1337,50 @@ export function App() {
             <canvas
               ref={insetLargeRef}
               className="inset inset-large"
-              width={720}
-              height={720}
+              width={1400}
+              height={1400}
+              onClick={(event) => {
+                event.stopPropagation()
+                if (performance.now() - insetDragEndRef.current < INSET_DRAG_SLOP_MS) return
+                // A plain click re-frames on the measured profile.
+                resetInsetView()
+              }}
+            />
+            <p className="inset-hint">滚轮缩放 · 拖动平移 · 点击图面适应断面 · 点击空白处或按 Esc 关闭</p>
+          </div>
+        ) : null}
+        {preview ? (
+          <div
+            className="inset-lightbox export-lightbox"
+            onClick={() => setPreview(null)}
+            role="dialog"
+            aria-modal="true"
+            aria-label={preview.label}
+          >
+            <img
+              className="export-large"
+              src={preview.url}
+              alt={preview.label}
               onClick={(event) => event.stopPropagation()}
             />
-            <p className="inset-hint">点击空白处或按 Esc 关闭</p>
+            <p className="inset-hint">
+              {preview.label} · 点击空白处或按 Esc 关闭 ·{' '}
+              <a className="inset-download" href={preview.url} download={`${preview.label}.png`}>
+                下载 PNG
+              </a>
+            </p>
           </div>
         ) : null}
         {meta ? (
           <StationFilm
             key={`${meta.source_name ?? ''}-${meta.s_min}-${meta.s_max}`}
             meta={meta}
+            rangeLo={(range ?? defaultWorkingRange(meta)).lo}
+            rangeHi={(range ?? defaultWorkingRange(meta)).hi}
             sliderRef={sSliderRef}
             onInput={onStationInput}
+            onRange={applyRange}
+            onResetRange={() => applyRange(defaultWorkingRange(meta).lo, defaultWorkingRange(meta).hi)}
           />
         ) : null}
         {showCurtain ? (
@@ -820,6 +1434,7 @@ function InstrumentRail(props: {
   onAlignHorseshoe: () => void
   onKinds: Dispatch<SetStateAction<Record<ExportKind, boolean>>>
   onExport: () => void
+  onPreview: (item: { url: string; label: string }) => void
   onOpenPicker: () => void
 }) {
   const methods = props.meta?.methods ?? ['hampel']
@@ -995,6 +1610,7 @@ function InstrumentRail(props: {
         exportUrls={props.exportUrls}
         onKinds={props.onKinds}
         onExport={props.onExport}
+        onPreview={props.onPreview}
       />
     </aside>
   )
@@ -1067,7 +1683,7 @@ function HorseshoePanel(props: {
         />
       </label>
       <label htmlFor="hs-v">
-        底板高 v
+        底板高（0 = 实测底面）
         <input
           id="hs-v"
           type="number"
@@ -1080,7 +1696,8 @@ function HorseshoePanel(props: {
         />
       </label>
       <p className="hint">
-        总高 {height.toFixed(2)} m，拱矢 {geom.rise.toFixed(2)} m，设计面积 {area.toFixed(2)} m²
+        底面基准取实测底板的平均值（v=0），装入点云后按当前断面自动对齐。总高{' '}
+        {height.toFixed(2)} m，拱矢 {geom.rise.toFixed(2)} m，设计面积 {area.toFixed(2)} m²
       </p>
       <div className="hs-actions">
         <button type="button" className="reset-look" disabled={props.disabled} onClick={props.onAlign}>
@@ -1144,6 +1761,7 @@ function ExportPanel(props: {
   exportUrls: Partial<Record<ExportKind, string>> | null
   onKinds: Dispatch<SetStateAction<Record<ExportKind, boolean>>>
   onExport: () => void
+  onPreview: (item: { url: string; label: string }) => void
 }) {
   return (
     <section className="block export">
@@ -1173,7 +1791,9 @@ function ExportPanel(props: {
       </button>
       {props.exporting && props.exportHint ? <p className="hint">{props.exportHint}</p> : null}
       {!props.exporting ? (
-        <p className="hint">本机 matplotlib（Pyodide Agg）出图，与 Python 同一套 plotting.py。首次需加载 WASM，会慢几秒到十几秒。</p>
+        <p className="hint">
+          本机 matplotlib 出图。多断面、面积、体积、总览用底部两端游标圈出的区间。
+        </p>
       ) : null}
       {props.exportError ? <p className="fail">{props.exportError}</p> : null}
       {props.exportUrls ? (
@@ -1182,10 +1802,16 @@ function ExportPanel(props: {
             const url = props.exportUrls?.[item.id]
             if (!url) return null
             return (
-              <a key={item.id} href={url} target="_blank" rel="noreferrer" className="thumb">
+              <button
+                key={item.id}
+                type="button"
+                className="thumb"
+                onClick={() => props.onPreview({ url, label: item.label })}
+                title="点击放大"
+              >
                 <img src={url} alt={item.label} />
                 <span>{item.label}</span>
-              </a>
+              </button>
             )
           })}
         </div>
@@ -1196,11 +1822,57 @@ function ExportPanel(props: {
 
 function StationFilm(props: {
   meta: Meta
+  rangeLo: number
+  rangeHi: number
   sliderRef: RefObject<HTMLInputElement | null>
   onInput: (event: ChangeEvent<HTMLInputElement>) => void
+  onRange: (lo: number, hi: number) => void
+  onResetRange: () => void
 }) {
   const start = defaultStation(props.meta)
-  const mid = (props.meta.s_min + props.meta.s_max) * 0.5
+  const trackRef = useRef<HTMLDivElement>(null)
+  const loRef = useRef(props.rangeLo)
+  const hiRef = useRef(props.rangeHi)
+  const [drag, setDrag] = useState<'lo' | 'hi' | null>(null)
+  loRef.current = props.rangeLo
+  hiRef.current = props.rangeHi
+  const sMin = props.meta.s_min
+  const sMax = props.meta.s_max
+  const span = Math.max(1e-9, sMax - sMin)
+  const pct = (s: number) => ((s - sMin) / span) * 100
+  const minW = rangeMinWidth(props.meta)
+  const loPct = pct(props.rangeLo)
+  const hiPct = pct(props.rangeHi)
+  const seeded = defaultWorkingRange(props.meta)
+  const atSeed =
+    Math.abs(props.rangeLo - seeded.lo) < 1e-4 && Math.abs(props.rangeHi - seeded.hi) < 1e-4
+
+  const onTrimDown = (which: 'lo' | 'hi') => (event: ReactPointerEvent<HTMLButtonElement>) => {
+    event.preventDefault()
+    event.stopPropagation()
+    const button = event.currentTarget
+    button.setPointerCapture(event.pointerId)
+    setDrag(which)
+    const track = trackRef.current
+    const move = (ev: PointerEvent) => {
+      if (!track) return
+      const rect = track.getBoundingClientRect()
+      const t = clamp((ev.clientX - rect.left) / Math.max(rect.width, 1), 0, 1)
+      const s = sMin + t * (sMax - sMin)
+      if (which === 'lo') props.onRange(Math.min(s, hiRef.current - minW), hiRef.current)
+      else props.onRange(loRef.current, Math.max(s, loRef.current + minW))
+    }
+    const up = () => {
+      setDrag(null)
+      button.removeEventListener('pointermove', move)
+      button.removeEventListener('pointerup', up)
+      button.removeEventListener('pointercancel', up)
+    }
+    button.addEventListener('pointermove', move)
+    button.addEventListener('pointerup', up)
+    button.addEventListener('pointercancel', up)
+  }
+
   return (
     <div className="film">
       <div className="sprockets" aria-hidden="true">
@@ -1210,22 +1882,69 @@ function StationFilm(props: {
       </div>
       <div className="film-row">
         <span className="film-label">桩号</span>
+        <span className="film-window">
+          {formatMeters(props.rangeLo)} – {formatMeters(props.rangeHi)}
+        </span>
+        <button
+          type="button"
+          className="film-reset"
+          disabled={atSeed}
+          onClick={props.onResetRange}
+          title="回到自动圈出的密实段"
+        >
+          复位
+        </button>
       </div>
-      <input
-        ref={props.sliderRef}
-        className="slider film-slider"
-        type="range"
-        min={props.meta.s_min}
-        max={props.meta.s_max}
-        step={0.01}
-        defaultValue={start}
-        aria-label="桩号"
-        onChange={props.onInput}
-      />
+      <div
+        ref={trackRef}
+        className={`film-stage${drag ? ' is-dragging' : ''}`}
+        title="两端游标：限制可拖的桩号，以及多断面、面积、体积、总览的出图范围"
+      >
+        <div className="film-rail" aria-hidden="true" />
+        <div
+          className="film-span"
+          style={{ left: `${loPct}%`, width: `${Math.max(0, hiPct - loPct)}%` }}
+        />
+        <button
+          type="button"
+          className={`film-trim is-in${drag === 'lo' ? ' is-drag' : ''}`}
+          style={{ left: `${loPct}%` }}
+          aria-label="区间起点"
+          title="拖动设定可用 / 出图起点"
+          onPointerDown={onTrimDown('lo')}
+          onDoubleClick={() => props.onRange(sMin, props.rangeHi)}
+        >
+          <span className="film-trim-flag" />
+          {drag === 'lo' ? <span className="film-trim-tip">{formatMeters(props.rangeLo)}</span> : null}
+        </button>
+        <button
+          type="button"
+          className={`film-trim is-out${drag === 'hi' ? ' is-drag' : ''}`}
+          style={{ left: `${hiPct}%` }}
+          aria-label="区间终点"
+          title="拖动设定可用 / 出图终点"
+          onPointerDown={onTrimDown('hi')}
+          onDoubleClick={() => props.onRange(props.rangeLo, sMax)}
+        >
+          <span className="film-trim-flag" />
+          {drag === 'hi' ? <span className="film-trim-tip">{formatMeters(props.rangeHi)}</span> : null}
+        </button>
+        <input
+          ref={props.sliderRef}
+          className="slider film-slider"
+          type="range"
+          min={sMin}
+          max={sMax}
+          step={0.01}
+          defaultValue={start}
+          aria-label="桩号"
+          onChange={props.onInput}
+        />
+      </div>
       <div className="chainage">
-        <span>{formatMeters(props.meta.s_min)}</span>
-        <span>{formatMeters(mid)}</span>
-        <span>{formatMeters(props.meta.s_max)}</span>
+        <span>{formatMeters(sMin)}</span>
+        <span>{formatMeters((sMin + sMax) * 0.5)}</span>
+        <span>{formatMeters(sMax)}</span>
       </div>
     </div>
   )

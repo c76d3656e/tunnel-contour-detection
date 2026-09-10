@@ -417,9 +417,19 @@ select,
   display: flex;
   flex-direction: column;
   gap: 0.2rem;
+  padding: 0;
+  border: 0;
+  background: transparent;
   color: var(--dust);
-  text-decoration: none;
+  font: inherit;
   font-size: 0.72rem;
+  text-align: left;
+  cursor: zoom-in;
+}
+
+.thumb:focus-visible {
+  outline: 2px solid var(--ember);
+  outline-offset: 2px;
 }
 
 .thumb img {
@@ -511,27 +521,92 @@ select,
   gap: 0.45rem;
 }
 
-.inset-btn {
-  display: block;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  cursor: zoom-in;
-  line-height: 0;
+.inset-box {
+  position: absolute;
+  top: 0.85rem;
+  right: 0.9rem;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  touch-action: none;
+  cursor: move;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.28);
 }
 
-.inset-btn:focus-visible {
+.inset-box.is-dragging {
+  cursor: grabbing;
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.42);
+}
+
+.inset-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+  padding: 0.16rem 0.3rem 0.16rem 0.44rem;
+  background: var(--home-bg);
+  border: 1px solid #8d8d8d;
+  border-bottom: 0;
+  font-size: 0.72rem;
+  color: var(--ink);
+  user-select: none;
+}
+
+.inset-title {
+  color: var(--dust);
+}
+
+.inset-bar-tools {
+  display: flex;
+  gap: 0.2rem;
+}
+
+.inset-tool {
+  padding: 0.06rem 0.34rem;
+  background: transparent;
+  color: var(--ink);
+  border: 1px solid var(--home-border);
+  font: inherit;
+  font-size: 0.7rem;
+  cursor: pointer;
+  border-radius: 1px;
+}
+
+.inset-tool:hover {
+  border-color: var(--ember);
+  color: var(--ember);
+}
+
+.inset-tool:focus-visible {
   outline: 2px solid var(--ember);
-  outline-offset: 2px;
+  outline-offset: 1px;
 }
 
 .inset {
   display: block;
-  width: 200px;
-  height: 200px;
   background: #fff;
   border: 1px solid #8d8d8d;
-  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.28);
+  box-shadow: none;
+  touch-action: none;
+  cursor: move;
+}
+
+.inset-grip {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 15px;
+  height: 15px;
+  cursor: nwse-resize;
+  background:
+    linear-gradient(
+      135deg,
+      transparent 0 45%,
+      #8d8d8d 45% 55%,
+      transparent 55% 70%,
+      #8d8d8d 70% 80%,
+      transparent 80%
+    );
 }
 
 .inset-lightbox {
@@ -558,6 +633,20 @@ select,
   margin: 0;
   color: #d7cbb8;
   font-size: 0.78rem;
+}
+
+.export-large {
+  max-width: min(86vw, 1100px);
+  max-height: 82vh;
+  background: #fff;
+  border: 1px solid #8d8d8d;
+  box-shadow: 0 10px 36px rgba(0, 0, 0, 0.5);
+  cursor: default;
+}
+
+.inset-download {
+  color: var(--ember);
+  text-decoration: underline;
 }
 
 .film {
@@ -588,6 +677,123 @@ select,
 .film-label {
   color: var(--dust);
   font-size: 0.78rem;
+}
+
+.film-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.7rem;
+  margin-bottom: 0.12rem;
+}
+
+.film-window {
+  flex: 1;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  color: var(--paper);
+  letter-spacing: 0.01em;
+}
+
+.film-reset {
+  margin-left: auto;
+  border: 0;
+  padding: 0;
+  background: none;
+  color: var(--dust);
+  font-family: var(--sans);
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+
+.film-reset:hover:not(:disabled) {
+  color: var(--paper);
+}
+
+.film-reset:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.film-stage {
+  position: relative;
+  height: 22px;
+}
+
+.film-stage.is-dragging,
+.film-stage.is-dragging * {
+  user-select: none;
+}
+
+.film-rail,
+.film-span {
+  position: absolute;
+  top: 9.5px;
+  height: 3px;
+  pointer-events: none;
+}
+
+.film-rail {
+  left: 0;
+  right: 0;
+  background: var(--track);
+}
+
+.film-span {
+  background: var(--teal);
+}
+
+.film-trim {
+  position: absolute;
+  top: 0;
+  z-index: 4;
+  width: 18px;
+  height: 22px;
+  transform: translateX(-50%);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: ew-resize;
+  touch-action: none;
+}
+
+.film-trim-flag {
+  display: block;
+  width: 8px;
+  height: 22px;
+  background: var(--chip);
+  border: 1px solid var(--ink);
+}
+
+.film-trim.is-in .film-trim-flag {
+  margin-right: auto;
+  border-radius: 2px 0 0 2px;
+  box-shadow: 3px 0 0 var(--teal);
+}
+
+.film-trim.is-out .film-trim-flag {
+  margin-left: auto;
+  border-radius: 0 2px 2px 0;
+  box-shadow: -3px 0 0 var(--teal);
+}
+
+.film-trim.is-drag .film-trim-flag,
+.film-trim:hover .film-trim-flag {
+  background: var(--paper);
+}
+
+.film-trim-tip {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 4px);
+  transform: translateX(-50%);
+  padding: 0.08rem 0.32rem;
+  background: var(--readout-bg);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  white-space: nowrap;
+  pointer-events: none;
 }
 
 .chainage {
@@ -640,8 +846,17 @@ select,
   cursor: ew-resize;
 }
 
+.film-stage .slider {
+  position: relative;
+  z-index: 2;
+}
+
 .film-slider::-webkit-slider-runnable-track {
-  background: linear-gradient(90deg, var(--teal) 0%, var(--track) 42%);
+  background: transparent;
+}
+
+.film-slider::-moz-range-track {
+  background: transparent;
 }
 
 .curtain {
@@ -699,11 +914,6 @@ select,
   .stage {
     order: 1;
     min-height: 58vh;
-  }
-
-  .inset {
-    width: 156px;
-    height: 156px;
   }
 }
 

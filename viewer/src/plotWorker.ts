@@ -32,34 +32,59 @@ def _xyz(path):
         return np.empty((0, 3), dtype=np.float64)
     return raw.reshape(-1, 3)
 
+def _usv(u, v, s):
+    """Display frame as matplotlib XYZ: X=u, Y=s (along the tunnel), Z=v (up)."""
+    u = np.asarray(u, dtype=float)
+    v = np.asarray(v, dtype=float)
+    if np.isscalar(s):
+        s = np.full(len(u), float(s))
+    else:
+        s = np.asarray(s, dtype=float)
+    if len(u) == 0:
+        return np.empty((0, 3), dtype=float)
+    return np.column_stack((u, s, v))
+
+
+def _uvs_to_usv(uvs):
+    points = np.asarray(uvs, dtype=float)
+    if len(points) == 0:
+        return np.empty((0, 3), dtype=float)
+    return np.column_stack((points[:, 0], points[:, 2], points[:, 1]))
+
+
 def render_figures(kinds, thickness, station, fit, methods):
     u = _f8("/tmp/u.bin")
     v = _f8("/tmp/v.bin")
     contour = _xy("/tmp/contour.bin")
-    slab = _xyz("/tmp/slab_xyz.bin")
-    contour_xyz = _xyz("/tmp/contour_xyz.bin")
-    overview = _xyz("/tmp/overview.bin")
-    origin = _f8("/tmp/origin.bin")
-    axis = _f8("/tmp/axis.bin")
+    s_pts = _f8("/tmp/z.bin")
+    overview = _uvs_to_usv(_xyz("/tmp/overview.bin"))
     design = _xy("/tmp/design.bin")
     stations = _f8("/tmp/stations.bin")
     areas = _f8("/tmp/areas.bin")
     volumes = _f8("/tmp/volumes.bin")
     samples = _xyz("/tmp/samples.bin")
     stats = json.loads(Path("/tmp/stats.json").read_text() or "null")
+    slab = _usv(u, v, s_pts)
+    contour_xyz = _usv(contour[:, 0], contour[:, 1], station) if len(contour) else np.empty((0, 3))
+    axis = np.array([0.0, 1.0, 0.0])
     files = {}
     if "section2d" in kinds:
         path = Path("/tmp/section_2d.png")
-        save_section_plot(path, u, v, contour, fit)
+        save_section_plot(path, u, v, contour, fit, station=station)
         files["section2d"] = str(path)
+    if "liveSection" in kinds:
+        path = Path("/tmp/live_section.png")
+        save_live_section_plot(path, u, v, contour, fit, design, station=station,
+                               thickness=thickness, stats=stats)
+        files["liveSection"] = str(path)
     if "section3d" in kinds:
         path = Path("/tmp/section_3d.png")
-        save_section_3d_plot(path, slab, contour_xyz, axis, thickness)
+        save_section_3d_plot(path, slab, contour_xyz, axis, thickness, station=station)
         files["section3d"] = str(path)
     if "tunnel3d" in kinds:
         path = Path("/tmp/tunnel_3d.png")
-        center = origin + station * axis
-        save_tunnel_3d_plot(path, overview, contour_xyz, axis, thickness, center)
+        center = contour_xyz.mean(axis=0) if len(contour_xyz) else np.array([0.0, station, 0.0])
+        save_tunnel_3d_plot(path, overview, contour_xyz, axis, thickness, center, station=station)
         files["tunnel3d"] = str(path)
     if "compare" in kinds:
         results = {}
@@ -76,7 +101,7 @@ def render_figures(kinds, thickness, station, fit, methods):
         files["compare"] = str(path)
     if "overbreak" in kinds:
         path = Path("/tmp/overbreak.png")
-        save_overbreak_plot(path, contour, design, samples, stats)
+        save_overbreak_plot(path, contour, design, samples, stats, station=station)
         files["overbreak"] = str(path)
     if "areaDepth" in kinds:
         path = Path("/tmp/area_depth.png")
@@ -99,7 +124,7 @@ def render_figures(kinds, thickness, station, fit, methods):
                 rings.append(ring)
         if "gallery" in kinds:
             path = Path("/tmp/gallery.png")
-            save_contour_gallery(path, sections)
+            save_contour_gallery(path, sections, station=station)
             files["gallery"] = str(path)
         if "stack" in kinds:
             path = Path("/tmp/stack.png")
@@ -142,6 +167,25 @@ os.makedirs("/tmp/mplconfig", exist_ok=True)
 os.environ["MPLCONFIGDIR"] = "/tmp/mplconfig"
 os.environ["MPLBACKEND"] = "Agg"
 `)
+    // SciencePlots ships a pure-Python wheel, so micropip can install it here.
+    // plotting.py falls back to plain matplotlib when this is unavailable.
+    try {
+      postProgress('正在装入 SciencePlots 样式')
+      await runtime.loadPackage('micropip')
+      runtime.runPython('import micropip')
+      const micropip = runtime.globals.get('micropip') as {
+        install: (target: string) => Promise<unknown>
+        destroy?: () => void
+      }
+      await micropip.install('SciencePlots')
+      micropip.destroy?.()
+    } catch (error) {
+      postProgress(
+        `SciencePlots 装入失败，改用 matplotlib 默认样式：${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      )
+    }
     runtime.runPython(plottingSrc)
     runtime.runPython(BOOTSTRAP)
     pyodide = runtime
@@ -168,12 +212,9 @@ self.onmessage = async (event: MessageEvent<{ type: 'init' } | { type: 'plot'; p
     postProgress('正在用 matplotlib 出图')
     writeF64(runtime, '/tmp/u.bin', pack.u)
     writeF64(runtime, '/tmp/v.bin', pack.v)
+    writeF64(runtime, '/tmp/z.bin', pack.z)
     writeF64(runtime, '/tmp/contour.bin', pack.contour)
-    writeF64(runtime, '/tmp/slab_xyz.bin', worldFromPack(pack))
-    writeF64(runtime, '/tmp/contour_xyz.bin', contourWorld(pack))
     writeF64(runtime, '/tmp/overview.bin', pack.overview)
-    writeF64(runtime, '/tmp/origin.bin', pack.origin)
-    writeF64(runtime, '/tmp/axis.bin', pack.axis)
     writeF64(runtime, '/tmp/design.bin', pack.design)
     writeF64(runtime, '/tmp/stations.bin', pack.stations)
     writeF64(runtime, '/tmp/areas.bin', pack.areas)
@@ -231,41 +272,4 @@ files = render_figures(
     const message = error instanceof Error ? error.message : 'matplotlib 出图失败'
     self.postMessage({ type: 'error', message })
   }
-}
-
-function worldFromPack(pack: PackedExport): Float64Array {
-  const n = pack.u.length
-  const out = new Float64Array(n * 3)
-  const origin = pack.origin
-  const axis = pack.axis
-  const uAxis = pack.uAxis
-  const vAxis = pack.vAxis
-  for (let i = 0; i < n; i += 1) {
-    const uu = pack.u[i]
-    const vv = pack.v[i]
-    const ss = pack.z[i]
-    out[i * 3] = origin[0] + uu * uAxis[0] + vv * vAxis[0] + ss * axis[0]
-    out[i * 3 + 1] = origin[1] + uu * uAxis[1] + vv * vAxis[1] + ss * axis[1]
-    out[i * 3 + 2] = origin[2] + uu * uAxis[2] + vv * vAxis[2] + ss * axis[2]
-  }
-  return out
-}
-
-function contourWorld(pack: PackedExport): Float64Array {
-  const n = (pack.contour.length / 2) | 0
-  const u = new Float64Array(n)
-  const v = new Float64Array(n)
-  const s = new Float64Array(n)
-  for (let i = 0; i < n; i += 1) {
-    u[i] = pack.contour[i * 2]
-    v[i] = pack.contour[i * 2 + 1]
-    s[i] = pack.s
-  }
-  const out = new Float64Array(n * 3)
-  for (let i = 0; i < n; i += 1) {
-    out[i * 3] = pack.origin[0] + u[i] * pack.uAxis[0] + v[i] * pack.vAxis[0] + s[i] * pack.axis[0]
-    out[i * 3 + 1] = pack.origin[1] + u[i] * pack.uAxis[1] + v[i] * pack.vAxis[1] + s[i] * pack.axis[1]
-    out[i * 3 + 2] = pack.origin[2] + u[i] * pack.uAxis[2] + v[i] * pack.vAxis[2] + s[i] * pack.axis[2]
-  }
-  return out
 }

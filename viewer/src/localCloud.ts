@@ -46,6 +46,17 @@ export class LocalCloud {
   } | null = null
   private onProgress: ((health: Health) => void) | null = null
   private plotProgress: ((message: string) => void) | null = null
+  /** Workers handle one job at a time; queue callers so pending slots never clash. */
+  private chain: Promise<unknown> = Promise.resolve()
+
+  private serialize<T>(job: () => Promise<T>): Promise<T> {
+    const run = this.chain.then(job, job)
+    this.chain = run.then(
+      () => undefined,
+      () => undefined,
+    )
+    return run
+  }
 
   private ensureWorker(): Worker {
     if (this.worker) return this.worker
@@ -115,7 +126,7 @@ export class LocalCloud {
     return { meta: result.meta, viz: result.viz }
   }
 
-  async export(
+  private async runExport(
     params: SliceParams,
     kinds: ExportKind[],
     horseshoe: HorseshoeParams,
@@ -143,6 +154,29 @@ export class LocalCloud {
     } finally {
       this.plotProgress = null
     }
+  }
+
+  export(
+    params: SliceParams,
+    kinds: ExportKind[],
+    horseshoe: HorseshoeParams,
+    onProgress?: (message: string) => void,
+  ): Promise<ExportResult> {
+    return this.serialize(() => this.runExport(params, kinds, horseshoe, onProgress))
+  }
+
+  /** Redraw just the live inset's section and hand back a downloadable object URL. */
+  exportLiveSection(
+    params: SliceParams,
+    horseshoe: HorseshoeParams,
+    onProgress?: (message: string) => void,
+  ): Promise<string> {
+    return this.serialize(async () => {
+      const result = await this.runExport(params, ['liveSection'], horseshoe, onProgress)
+      const url = result.urls.liveSection
+      if (!url) throw new Error('实时断面图出图失败')
+      return url
+    })
   }
 
   dispose(): void {

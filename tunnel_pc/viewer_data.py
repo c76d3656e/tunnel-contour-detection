@@ -285,17 +285,21 @@ def export_section(cache: ViewerCache, s_center: float, thickness: float,
     u = local @ cache.u_axis
     v = local @ cache.v_axis
     contour_uv = np.asarray(payload["contour_uv"], dtype=float)
-    contour_world = np.asarray(payload.get("contour_world") or [], dtype=float)
-    if len(contour_world) == 0 and len(contour_uv):
-        contour_world = _world(cache, s_center, contour_uv)
     files = {}
     if "section2d" in kinds:
         path = folder / "section_2d.png"
-        save_section_plot(path, u, v, contour_uv, payload.get("fit"))
+        save_section_plot(path, u, v, contour_uv, payload.get("fit"), station=s_center)
         files["section2d"] = path.as_posix()
     if "section3d" in kinds:
         path = folder / "section_3d.png"
-        save_section_3d_plot(path, slab, contour_world, cache.axis, thickness)
+        slab_s = np.asarray(cache.s[i0:i1], dtype=float)
+        slab_disp = np.column_stack((u, slab_s, v)) if len(u) else np.empty((0, 3))
+        contour_disp = (
+            np.column_stack((contour_uv[:, 0], np.full(len(contour_uv), s_center), contour_uv[:, 1]))
+            if len(contour_uv) else np.empty((0, 3))
+        )
+        save_section_3d_plot(path, slab_disp, contour_disp, np.array([0.0, 1.0, 0.0]),
+                             thickness, station=s_center)
         files["section3d"] = path.as_posix()
     if "tunnel3d" in kinds:
         path = folder / "tunnel_3d.png"
@@ -303,8 +307,21 @@ def export_section(cache: ViewerCache, s_center: float, thickness: float,
         i0 = int(np.searchsorted(cache.s, lo, side="left"))
         i1 = int(np.searchsorted(cache.s, hi, side="right"))
         dense = cache.xyz[i0:i1]
-        overview = np.asarray(dense[::max(1, len(dense) // 120000)]) if len(dense) else np.empty((0, 3))
-        save_tunnel_3d_plot(path, overview, contour_world, cache.axis, thickness, center)
+        stride = max(1, len(dense) // 120000) if len(dense) else 1
+        pts = np.asarray(dense[::stride], dtype=np.float64) if len(dense) else np.empty((0, 3))
+        ss = np.asarray(cache.s[i0:i1][::stride], dtype=float) if len(dense) else np.empty((0,))
+        if len(pts):
+            delta = pts - cache.origin
+            overview = np.column_stack((delta @ cache.u_axis, ss, delta @ cache.v_axis))
+        else:
+            overview = np.empty((0, 3))
+        contour_disp = (
+            np.column_stack((contour_uv[:, 0], np.full(len(contour_uv), s_center), contour_uv[:, 1]))
+            if len(contour_uv) else np.empty((0, 3))
+        )
+        center = contour_disp.mean(axis=0) if len(contour_disp) else np.array([0.0, s_center, 0.0])
+        save_tunnel_3d_plot(path, overview, contour_disp, np.array([0.0, 1.0, 0.0]),
+                            thickness, center, station=s_center)
         files["tunnel3d"] = path.as_posix()
     if "compare" in kinds:
         path = folder / "methods.png"

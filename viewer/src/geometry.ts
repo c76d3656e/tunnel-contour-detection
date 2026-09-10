@@ -136,6 +136,63 @@ export function denseStationRange(s: Float32Array, bins = 64): [number, number] 
   return [lo + (first / bins) * span, lo + ((last + 1) / bins) * span]
 }
 
+/**
+ * Measured floor level in raw v, used as the frame's 0 point.
+ *
+ * Each slab contributes its own low percentile, then a trimmed mean over slabs
+ * follows, so a single mucky or barely-scanned station cannot drag the datum.
+ */
+export function estimateFloorDatum(
+  display: Float32Array,
+  sortedS: Float32Array,
+  i0: number,
+  i1: number,
+  slab = 0.2,
+): number {
+  const count = i1 - i0
+  if (count < 64) return 0
+  const lo = sortedS[i0]
+  const span = sortedS[i1 - 1] - lo
+  if (!(span > 0)) return 0
+  const bins = Math.max(1, Math.round(span / slab))
+  const per: number[] = []
+  const scratch: number[] = []
+  let cursor = i0
+  for (let b = 0; b < bins; b += 1) {
+    const a = lo + (span * b) / bins
+    const z = lo + (span * (b + 1)) / bins
+    while (cursor < i1 && sortedS[cursor] < a) cursor += 1
+    let end = cursor
+    while (end < i1 && sortedS[end] < z) end += 1
+    const n = end - cursor
+    if (n >= 64) {
+      const stride = Math.max(1, Math.floor(n / 4000))
+      scratch.length = 0
+      for (let i = cursor; i < end; i += stride) scratch.push(display[i * 3 + 1])
+      scratch.sort((x, y) => x - y)
+      per.push(percentileSorted(scratch, 0.03))
+    }
+    cursor = end
+  }
+  if (!per.length) return 0
+  per.sort((x, y) => x - y)
+  const median = per[per.length >> 1]
+  const kept = per.filter((x) => Math.abs(x - median) <= 0.5)
+  const use = kept.length ? kept : per
+  let sum = 0
+  for (const value of use) sum += value
+  return sum / use.length
+}
+
+function percentileSorted(sorted: number[], q: number): number {
+  if (!sorted.length) return 0
+  const pos = (sorted.length - 1) * q
+  const lo = Math.floor(pos)
+  const hi = Math.ceil(pos)
+  if (lo === hi) return sorted[lo]
+  return sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo)
+}
+
 export function percentileAbs(values: Float64Array, q: number): number {
   const copy = Float64Array.from(values)
   copy.sort()

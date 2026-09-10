@@ -1,12 +1,11 @@
 import { DEFAULT_METHOD, DISPLAY_FRAME, METHODS, type ExportKind, type Meta, type SliceParams } from './types'
-import { flattenContour, overviewWorld, transferList, type PackedExport } from './exportPack'
-import { denseStationRange, frame, percentileAbs, principalAxis } from './geometry'
+import { flattenContour, packOverview, transferList, type PackedExport } from './exportPack'
+import { denseStationRange, estimateFloorDatum, frame, percentileAbs, principalAxis } from './geometry'
 import { horseshoePolyline, overbreakStats, polarSamples, polygonArea, type HorseshoeParams } from './horseshoe'
 import { parseLas } from './lasParse'
 import { LiveSlicer } from './liveSlice'
 
 const VIZ_POINTS = 300000
-const EXPORT_CAP = 80000
 
 type InMessage =
   | { type: 'open'; name: string; buffer: ArrayBuffer }
@@ -38,32 +37,33 @@ function buildDisplay(world: Float32Array, name: string): { display: Float32Arra
   order.sort((a, b) => s[a] - s[b])
   const display = new Float32Array(n * 3)
   const sortedS = new Float32Array(n)
-  const absU = new Float64Array(Math.min(n, 400000))
-  const absV = new Float64Array(Math.min(n, 400000))
-  const absStride = Math.max(1, Math.ceil(n / absU.length))
-  let absN = 0
   for (let i = 0; i < n; i += 1) {
     const src = order[i]
     const dx = world[src * 3] - origin[0]
     const dy = world[src * 3 + 1] - origin[1]
     const dz = world[src * 3 + 2] - origin[2]
-    const uu = dx * u[0] + dy * u[1] + dz * u[2]
-    const vv = dx * vUp[0] + dy * vUp[1] + dz * vUp[2]
-    display[i * 3] = uu
-    display[i * 3 + 1] = vv
+    display[i * 3] = dx * u[0] + dy * u[1] + dz * u[2]
+    display[i * 3 + 1] = dx * vUp[0] + dy * vUp[1] + dz * vUp[2]
     display[i * 3 + 2] = s[src]
     sortedS[i] = s[src]
-    if (i % absStride === 0 && absN < absU.length) {
-      absU[absN] = Math.abs(uu)
-      absV[absN] = Math.abs(vv)
-      absN += 1
-    }
   }
   const [denseLo, denseHi] = denseStationRange(sortedS)
   let i0 = 0
   while (i0 < n && sortedS[i0] < denseLo) i0 += 1
   let i1 = n
   while (i1 > i0 && sortedS[i1 - 1] > denseHi) i1 -= 1
+  postProgress('正在估计底板', name)
+  const floorV = estimateFloorDatum(display, sortedS, i0, i1)
+  for (let i = 0; i < n; i += 1) display[i * 3 + 1] -= floorV
+  const absU = new Float64Array(Math.min(n, 400000))
+  const absV = new Float64Array(Math.min(n, 400000))
+  const absStride = Math.max(1, Math.ceil(n / absU.length))
+  let absN = 0
+  for (let i = 0; i < n; i += absStride) {
+    absU[absN] = Math.abs(display[i * 3])
+    absV[absN] = Math.abs(display[i * 3 + 1])
+    absN += 1
+  }
   const denseCount = Math.max(1, i1 - i0)
   const stride = Math.max(1, Math.ceil(denseCount / VIZ_POINTS))
   const vizCount = Math.ceil(denseCount / stride)
@@ -76,6 +76,11 @@ function buildDisplay(world: Float32Array, name: string): { display: Float32Arra
     w += 1
   }
   const uvExtent = Math.max(percentileAbs(absU.subarray(0, absN), 0.995), percentileAbs(absV.subarray(0, absN), 0.995), 1.5) * 2.4
+  const shiftedOrigin: [number, number, number] = [
+    origin[0] + floorV * vUp[0],
+    origin[1] + floorV * vUp[1],
+    origin[2] + floorV * vUp[2],
+  ]
   const nextMeta: Meta = {
     point_count: n,
     viz_count: w,
@@ -87,7 +92,8 @@ function buildDisplay(world: Float32Array, name: string): { display: Float32Arra
     methods: [...METHODS],
     default_method: DEFAULT_METHOD,
     display_frame: DISPLAY_FRAME,
-    origin: [...origin],
+    floor_v: floorV,
+    origin: [...shiftedOrigin],
     axis: [...axis],
     u: [...u],
     v_up: [...vUp],
@@ -117,7 +123,8 @@ self.onmessage = async (event: MessageEvent<InMessage>) => {
     }
     if (data.type === 'export') {
       if (!full || !viz || !meta) throw new Error('还没有装入点云')
-      const slicer = new LiveSlicer(full, EXPORT_CAP)
+      // Same cloud and cap as the live inset, so the exported wall contour is that outline.
+      const slicer = new LiveSlicer(viz)
       const params = data.params
       const frame = slicer.sample({
         s: params.s,
@@ -127,6 +134,8 @@ self.onmessage = async (event: MessageEvent<InMessage>) => {
         smoothWindow: params.smooth_window,
       })
       const slab = slicer.takeSlab()
+      const contour = flattenContour(frame.contour_uv)
+      const fit = frame.fit
       const compare = data.kinds.includes('compare')
         ? METHODS.map((method) => {
             const item = slicer.sample({
@@ -154,8 +163,8 @@ self.onmessage = async (event: MessageEvent<InMessage>) => {
       const wantProfile = data.kinds.some((kind) =>
         kind === 'areaDepth' || kind === 'volumeDepth' || kind === 'gallery' || kind === 'stack',
       )
-      const lo = meta.dense_s_min ?? meta.s_min
-      const hi = meta.dense_s_max ?? meta.s_max
+      const lo = params.range_lo ?? meta.dense_s_min ?? meta.s_min
+      const hi = params.range_hi ?? meta.dense_s_max ?? meta.s_max
       const nProf = wantProfile ? 24 : 0
       const stations = new Float64Array(nProf)
       const areas = new Float64Array(nProf)
@@ -189,9 +198,9 @@ self.onmessage = async (event: MessageEvent<InMessage>) => {
         u: slab.u,
         v: slab.v,
         z: slab.z,
-        contour: flattenContour(frame.contour_uv),
-        fit: frame.fit,
-        overview: overviewWorld(viz, meta.origin, meta.axis, meta.u, meta.v_up),
+        contour,
+        fit,
+        overview: packOverview(viz, 120000, lo, hi),
         compare,
         design: flattenContour(designPoly),
         stations,

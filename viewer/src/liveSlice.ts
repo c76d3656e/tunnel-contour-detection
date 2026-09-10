@@ -77,6 +77,12 @@ function wrapIndex(index: number, n: number): number {
   return i
 }
 
+function copyPairs(points: number[][]): number[][] {
+  const out = new Array(points.length)
+  for (let i = 0; i < points.length; i += 1) out[i] = [points[i][0], points[i][1]]
+  return out
+}
+
 function interpPeriodic(radial: Float64Array, bins: number): void {
   const xs: number[] = []
   const ys: number[] = []
@@ -341,10 +347,11 @@ export class LiveSlicer {
       s: opts.s,
       pointCount: rawCount,
       coverage: this.lastCoverage,
-      contour_uv: contour,
+      // Scratch buffers are reused on the next sample(); callers must not alias them.
+      contour_uv: copyPairs(contour),
       fit,
-      fit_line: fit ? this.circleLine(fit) : [],
-      slab: this.insetSlab(n),
+      fit_line: fit ? copyPairs(this.circleLine(fit)) : [],
+      slab: copyPairs(this.insetSlab(n)),
     }
   }
 

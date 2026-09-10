@@ -104,12 +104,16 @@ export class TunnelViewer {
     uStation: { value: number }
     uHalf: { value: number }
     uOn: { value: number }
+    uRangeLo: { value: number }
+    uRangeHi: { value: number }
     uSliceRgb: { value: unknown }
     uBaseRgb: { value: unknown }
   } = {
     uStation: { value: 0 },
     uHalf: { value: 0.1 },
     uOn: { value: 1 },
+    uRangeLo: { value: -1e6 },
+    uRangeHi: { value: 1e6 },
     uSliceRgb: { value: hexToRgb('#e8b04a') },
     uBaseRgb: { value: scaledCloudRgb(defaultAppearance()) },
   }
@@ -189,6 +193,11 @@ export class TunnelViewer {
 
   setThickness(thickness: number): void {
     this.sliceUniforms.uHalf.value = Math.max(0.01, thickness * 0.5)
+  }
+
+  setWorkingRange(lo: number, hi: number): void {
+    this.sliceUniforms.uRangeLo.value = lo
+    this.sliceUniforms.uRangeHi.value = hi
   }
 
   setAppearance(look: Appearance): void {
@@ -314,11 +323,13 @@ export class TunnelViewer {
 
   private hookSliceShader(material: THREE.PointsMaterial): void {
     const uniforms = this.sliceUniforms
-    material.customProgramCacheKey = () => 'cloud-slice-band-v2'
+    material.customProgramCacheKey = () => 'cloud-slice-band-v3'
     material.onBeforeCompile = (shader) => {
       shader.uniforms.uStation = uniforms.uStation
       shader.uniforms.uHalf = uniforms.uHalf
       shader.uniforms.uOn = uniforms.uOn
+      shader.uniforms.uRangeLo = uniforms.uRangeLo
+      shader.uniforms.uRangeHi = uniforms.uRangeHi
       shader.uniforms.uSliceRgb = uniforms.uSliceRgb
       shader.uniforms.uBaseRgb = uniforms.uBaseRgb
       shader.vertexShader = shader.vertexShader
@@ -328,7 +339,10 @@ export class TunnelViewer {
 uniform float uStation;
 uniform float uHalf;
 uniform float uOn;
-varying float vSlice;`,
+uniform float uRangeLo;
+uniform float uRangeHi;
+varying float vSlice;
+varying float vOutside;`,
         )
         .replace(
           '#include <color_vertex>',
@@ -336,6 +350,7 @@ varying float vSlice;`,
 {
   float d = abs(position.z - uStation);
   vSlice = uOn * (1.0 - smoothstep(uHalf * 0.72, uHalf, d));
+  vOutside = 1.0 - step(uRangeLo, position.z) * step(position.z, uRangeHi);
 }`,
         )
         .replace(
@@ -349,7 +364,8 @@ gl_PointSize *= mix(1.0, 2.6, vSlice);`,
           `#include <common>
 uniform vec3 uSliceRgb;
 uniform vec3 uBaseRgb;
-varying float vSlice;`,
+varying float vSlice;
+varying float vOutside;`,
         )
         .replace(
           '#include <color_fragment>',
@@ -357,6 +373,8 @@ varying float vSlice;`,
 {
   diffuseColor.rgb = mix(uBaseRgb, uSliceRgb, vSlice);
   diffuseColor.a = mix(diffuseColor.a * 0.72, 1.0, vSlice);
+  diffuseColor.rgb *= mix(1.0, 0.28, vOutside);
+  diffuseColor.a *= mix(1.0, 0.1, vOutside);
 }`,
         )
     }

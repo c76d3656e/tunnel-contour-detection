@@ -14,6 +14,8 @@ export interface Meta {
   dense_s_min?: number
   dense_s_max?: number
   uv_extent: number
+  /** Raw v of the measured floor before the frame was shifted; the frame's 0 now sits on it. */
+  floor_v?: number
   methods: string[]
   default_method: string
   display_frame: string
@@ -39,6 +41,9 @@ export interface SliceParams {
   method: string
   contour_bins: number
   smooth_window: number
+  /** Inclusive working window; gallery / area / volume / overview stay inside it. */
+  range_lo?: number
+  range_hi?: number
 }
 
 export type ExportKind =
@@ -51,6 +56,8 @@ export type ExportKind =
   | 'gallery'
   | 'stack'
   | 'overbreak'
+  /** The live inset's section: points, contour, fit circle and design profile. */
+  | 'liveSection'
 
 export interface SliceResult {
   s: number
