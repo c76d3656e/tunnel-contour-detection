@@ -443,10 +443,7 @@ select,
 }
 
 .home {
-  position: absolute;
-  top: 0.85rem;
-  right: 0.9rem;
-  z-index: 3;
+  position: static;
   background: var(--home-bg);
   color: var(--ink);
   border: 1px solid var(--home-border);
@@ -502,15 +499,64 @@ select,
   text-align: right;
 }
 
-.inset {
+.stage-tr {
   position: absolute;
+  top: 0.85rem;
   right: 0.9rem;
-  bottom: 5.6rem;
   z-index: 3;
-  width: 168px;
-  height: 168px;
-  border: 1px solid var(--inset-border);
-  box-shadow: 0 0 0 4px var(--inset-ring);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.45rem;
+}
+
+.inset-btn {
+  display: block;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: zoom-in;
+  line-height: 0;
+}
+
+.inset-btn:focus-visible {
+  outline: 2px solid var(--ember);
+  outline-offset: 2px;
+}
+
+.inset {
+  display: block;
+  width: 200px;
+  height: 200px;
+  background: #fff;
+  border: 1px solid #8d8d8d;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.28);
+}
+
+.inset-lightbox {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.55rem;
+  background: rgba(12, 10, 8, 0.78);
+  cursor: zoom-out;
+}
+
+.inset-large {
+  width: min(72vmin, 640px);
+  height: min(72vmin, 640px);
+  cursor: default;
+  box-shadow: 0 10px 36px rgba(0, 0, 0, 0.5);
+}
+
+.inset-hint {
+  margin: 0;
+  color: #d7cbb8;
+  font-size: 0.78rem;
 }
 
 .film {
@@ -541,10 +587,6 @@ select,
 .film-label {
   color: var(--dust);
   font-size: 0.78rem;
-}
-
-.film-readout {
-  color: var(--ink);
 }
 
 .chainage {
@@ -659,9 +701,8 @@ select,
   }
 
   .inset {
-    width: 128px;
-    height: 128px;
-    bottom: 5.2rem;
+    width: 156px;
+    height: 156px;
   }
 }
 

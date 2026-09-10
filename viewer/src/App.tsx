@@ -83,6 +83,54 @@ function defaultStation(meta: Meta): number {
   return lo + (hi - lo) * 0.55
 }
 
+function insetView(slice: PreviewFrame | null, uvExtent: number): { u0: number; v0: number; span: number } {
+  const fallback = Math.max(0.8, uvExtent * 0.42)
+  if (!slice) return { u0: 0, v0: 0, span: fallback }
+  if (slice.fit && slice.fit.radius > 0) {
+    let reach = slice.fit.radius
+    for (const p of slice.contour_uv) {
+      reach = Math.max(reach, Math.hypot(p[0] - slice.fit.center_x, p[1] - slice.fit.center_y))
+    }
+    return {
+      u0: slice.fit.center_x,
+      v0: slice.fit.center_y,
+      span: Math.max(0.6, reach * 1.18),
+    }
+  }
+  const pts = slice.contour_uv.length ? slice.contour_uv : slice.slab
+  if (!pts.length) return { u0: 0, v0: 0, span: fallback }
+  let su = 0
+  let sv = 0
+  for (const p of pts) {
+    su += p[0]
+    sv += p[1]
+  }
+  const u0 = su / pts.length
+  const v0 = sv / pts.length
+  let reach = 0
+  for (const p of pts) reach = Math.max(reach, Math.hypot(p[0] - u0, p[1] - v0))
+  return { u0, v0, span: Math.max(0.6, reach * 1.18) }
+}
+
+function niceTicks(min: number, max: number, count = 5): number[] {
+  const span = Math.max(1e-6, max - min)
+  const raw = span / Math.max(1, count - 1)
+  const mag = 10 ** Math.floor(Math.log10(raw))
+  const norm = raw / mag
+  const step = (norm >= 5 ? 5 : norm >= 2 ? 2 : 1) * mag
+  const start = Math.ceil((min - 1e-12) / step) * step
+  const ticks: number[] = []
+  for (let value = start; value <= max + 1e-9; value += step) ticks.push(value)
+  return ticks.length ? ticks : [0]
+}
+
+function formatTick(value: number, step: number): string {
+  const digits = step >= 1 ? 0 : step >= 0.1 ? 1 : 2
+  const rounded = Number(value.toFixed(digits))
+  if (Math.abs(rounded) < 10 ** -(digits + 1)) return '0'
+  return rounded.toFixed(digits)
+}
+
 function drawUvInset(
   canvas: HTMLCanvasElement,
   slice: PreviewFrame | null,
@@ -93,75 +141,132 @@ function drawUvInset(
   if (!ctx) return
   const width = canvas.width
   const height = canvas.height
+  const unit = width / 360
+  const left = 44 * unit
+  const right = width - 14 * unit
+  const top = 28 * unit
+  const bottom = height - 36 * unit
+  const view = insetView(slice, uvExtent)
+  const scale = Math.min((right - left) / (view.span * 2), (bottom - top) / (view.span * 2))
+  const cx = (left + right) * 0.5
+  const cy = (top + bottom) * 0.5
+  const xOf = (u: number) => cx + (u - view.u0) * scale
+  const yOf = (v: number) => cy - (v - view.v0) * scale
+  const tickCount = width >= 540 ? 7 : 5
+  const uTicks = niceTicks(view.u0 - view.span, view.u0 + view.span, tickCount)
+  const vTicks = niceTicks(view.v0 - view.span, view.v0 + view.span, tickCount)
+  const uStep = uTicks.length > 1 ? uTicks[1] - uTicks[0] : 1
+  const vStep = vTicks.length > 1 ? vTicks[1] - vTicks[0] : 1
+
   ctx.clearRect(0, 0, width, height)
-  ctx.fillStyle = look.theme === 'light' ? '#f7f1e6' : '#eadfcb'
+  ctx.fillStyle = '#ffffff'
   ctx.fillRect(0, 0, width, height)
-  ctx.strokeStyle = 'rgba(63,143,136,0.28)'
-  ctx.lineWidth = 1
-  for (let y = 22; y < height; y += 18) {
+
+  ctx.save()
+  ctx.beginPath()
+  ctx.rect(left, top, right - left, bottom - top)
+  ctx.clip()
+
+  ctx.strokeStyle = 'rgba(0,0,0,0.12)'
+  ctx.lineWidth = unit
+  ctx.setLineDash([])
+  for (const tick of uTicks) {
+    const x = xOf(tick)
     ctx.beginPath()
-    ctx.moveTo(8, y)
-    ctx.lineTo(width - 8, y)
+    ctx.moveTo(x, top)
+    ctx.lineTo(x, bottom)
     ctx.stroke()
   }
-  const pad = 22
-  const size = Math.min(width, height) - pad * 2
-  const cx = width * 0.5
-  const cy = height * 0.52
-  const span = Math.max(0.8, uvExtent * 0.42)
-  const scale = size / (span * 2)
-  const xOf = (u: number) => cx + u * scale
-  const yOf = (v: number) => cy - v * scale
+  for (const tick of vTicks) {
+    const y = yOf(tick)
+    ctx.beginPath()
+    ctx.moveTo(left, y)
+    ctx.lineTo(right, y)
+    ctx.stroke()
+  }
 
-  ctx.strokeStyle = 'rgba(28,22,18,0.28)'
-  ctx.beginPath()
-  ctx.moveTo(pad, cy)
-  ctx.lineTo(width - pad, cy)
-  ctx.moveTo(cx, pad)
-  ctx.lineTo(cx, height - 16)
-  ctx.stroke()
-
-  ctx.fillStyle = '#5c5348'
-  ctx.font = '11px "IBM Plex Mono", monospace'
-  ctx.fillText('u', width - 20, cy - 6)
-  ctx.fillText('v', cx + 6, 16)
-
-  if (!slice) return
-
-  if (slice.slab.length > 0) {
+  if (slice?.slab.length) {
     ctx.fillStyle = look.slice
+    ctx.globalAlpha = 0.55
+    const dot = Math.max(1.2, 1.8 * unit)
     for (let i = 0; i < slice.slab.length; i += 1) {
       const p = slice.slab[i]
-      ctx.fillRect(xOf(p[0]) - 0.8, yOf(p[1]) - 0.8, 1.6, 1.6)
+      ctx.fillRect(xOf(p[0]) - dot * 0.5, yOf(p[1]) - dot * 0.5, dot, dot)
     }
+    ctx.globalAlpha = 1
   }
 
-  if (slice.fit) {
+  if (slice?.fit) {
     ctx.strokeStyle = look.fit
-    ctx.lineWidth = 1.6
+    ctx.lineWidth = 1.35 * unit
+    ctx.setLineDash([5 * unit, 3.5 * unit])
     ctx.beginPath()
-    ctx.arc(xOf(slice.fit.center_x), yOf(slice.fit.center_y), slice.fit.radius * scale, 0, Math.PI * 2)
+    ctx.arc(cx, cy, slice.fit.radius * scale, 0, Math.PI * 2)
     ctx.stroke()
+    ctx.setLineDash([])
   }
 
-  if (slice.contour_uv.length > 1) {
+  if (slice && slice.contour_uv.length > 1) {
     ctx.strokeStyle = look.contour
-    ctx.lineWidth = 1.8
+    ctx.lineWidth = 1.7 * unit
     ctx.beginPath()
-    const first = slice.contour_uv[0]
-    ctx.moveTo(xOf(first[0]), yOf(first[1]))
+    ctx.moveTo(xOf(slice.contour_uv[0][0]), yOf(slice.contour_uv[0][1]))
     for (let i = 1; i < slice.contour_uv.length; i += 1) {
-      const p = slice.contour_uv[i]
-      ctx.lineTo(xOf(p[0]), yOf(p[1]))
+      ctx.lineTo(xOf(slice.contour_uv[i][0]), yOf(slice.contour_uv[i][1]))
     }
     ctx.closePath()
     ctx.stroke()
   }
+  ctx.restore()
+
+  ctx.strokeStyle = '#333333'
+  ctx.lineWidth = 1.15 * unit
+  ctx.strokeRect(left + 0.5, top + 0.5, right - left - 1, bottom - top - 1)
+
+  ctx.fillStyle = '#222222'
+  ctx.strokeStyle = '#333333'
+  ctx.font = `${11 * unit}px "IBM Plex Sans", "Noto Sans SC", sans-serif`
+  ctx.textBaseline = 'middle'
+  for (const tick of uTicks) {
+    const x = xOf(tick)
+    if (x < left - 1 || x > right + 1) continue
+    ctx.beginPath()
+    ctx.moveTo(x, bottom)
+    ctx.lineTo(x, bottom + 5 * unit)
+    ctx.stroke()
+    ctx.textAlign = 'center'
+    ctx.fillText(formatTick(tick, uStep), x, bottom + 14 * unit)
+  }
+  for (const tick of vTicks) {
+    const y = yOf(tick)
+    if (y < top - 1 || y > bottom + 1) continue
+    ctx.beginPath()
+    ctx.moveTo(left - 5 * unit, y)
+    ctx.lineTo(left, y)
+    ctx.stroke()
+    ctx.textAlign = 'right'
+    ctx.fillText(formatTick(tick, vStep), left - 8 * unit, y)
+  }
+
+  ctx.fillStyle = '#222222'
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'alphabetic'
+  ctx.font = `600 ${13 * unit}px "IBM Plex Sans", "Noto Sans SC", sans-serif`
+  ctx.fillText(slice ? `s = ${slice.s.toFixed(2)} m` : 's = —', (left + right) * 0.5, 18 * unit)
+  ctx.font = `${11 * unit}px "IBM Plex Sans", "Noto Sans SC", sans-serif`
+  ctx.fillText('u (m)', (left + right) * 0.5, height - 8 * unit)
+  ctx.save()
+  ctx.translate(14 * unit, (top + bottom) * 0.5)
+  ctx.rotate(-Math.PI / 2)
+  ctx.textBaseline = 'middle'
+  ctx.fillText('v (m)', 0, 0)
+  ctx.restore()
 }
 
 export function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const insetRef = useRef<HTMLCanvasElement>(null)
+  const insetLargeRef = useRef<HTMLCanvasElement>(null)
   const viewerRef = useRef<InstanceType<typeof import('./viewer/TunnelViewer').TunnelViewer> | null>(null)
   const sRef = useRef(0)
   const thicknessRef = useRef(DEFAULT_THICKNESS)
@@ -171,7 +276,6 @@ export function App() {
   const metaRef = useRef<Meta | null>(null)
   const sSliderRef = useRef<HTMLInputElement>(null)
   const thickSliderRef = useRef<HTMLInputElement>(null)
-  const sLiveRef = useRef<HTMLSpanElement>(null)
   const thickLiveRef = useRef<HTMLSpanElement>(null)
   const paintRaf = useRef(0)
   const slicerRef = useRef<LiveSlicer | null>(null)
@@ -205,6 +309,14 @@ export function App() {
   const [exportHint, setExportHint] = useState<string | null>(null)
   const [exportError, setExportError] = useState<string | null>(null)
   const [exportUrls, setExportUrls] = useState<Partial<Record<ExportKind, string>> | null>(null)
+  const [insetOpen, setInsetOpen] = useState(false)
+
+  const redrawInsets = (frame: PreviewFrame | null, lookNow: Appearance) => {
+    const currentMeta = metaRef.current
+    if (!currentMeta || !frame) return
+    if (insetRef.current) drawUvInset(insetRef.current, frame, currentMeta.uv_extent, lookNow)
+    if (insetLargeRef.current) drawUvInset(insetLargeRef.current, frame, currentMeta.uv_extent, lookNow)
+  }
 
   const paintPreview = () => {
     const currentMeta = metaRef.current
@@ -220,9 +332,7 @@ export function App() {
     })
     lastFrameRef.current = frame
     viewer.applyPreview(frame)
-    if (insetRef.current) {
-      drawUvInset(insetRef.current, frame, currentMeta.uv_extent, lookRef.current)
-    }
+    redrawInsets(frame, lookRef.current)
     startTransition(() => {
       setHud({
         s: frame.s,
@@ -247,7 +357,6 @@ export function App() {
     const next = clamp(value, current.s_min, current.s_max)
     sRef.current = next
     if (!fromSlider && sSliderRef.current) sSliderRef.current.value = String(next)
-    if (sLiveRef.current) sLiveRef.current.textContent = formatMeters(next)
     viewerRef.current?.setStation(next)
     schedulePaint()
   }
@@ -291,17 +400,32 @@ export function App() {
     applyThemeClass(look.theme)
     saveAppearance(look)
     viewerRef.current?.setAppearance(look)
-    if (overlays.inset && insetRef.current && lastFrameRef.current && metaRef.current) {
-      drawUvInset(insetRef.current, lastFrameRef.current, metaRef.current.uv_extent, look)
-    }
+    redrawInsets(lastFrameRef.current, look)
   }, [look, overlays.inset])
 
   useEffect(() => {
     viewerRef.current?.setOverlays(overlays)
-    if (overlays.inset && insetRef.current && lastFrameRef.current && metaRef.current) {
-      drawUvInset(insetRef.current, lastFrameRef.current, metaRef.current.uv_extent, lookRef.current)
-    }
+    if (!overlays.inset) setInsetOpen(false)
+    redrawInsets(lastFrameRef.current, lookRef.current)
   }, [overlays])
+
+  useEffect(() => {
+    if (!insetOpen) return
+    const id = window.requestAnimationFrame(() => {
+      redrawInsets(lastFrameRef.current, lookRef.current)
+    })
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        setInsetOpen(false)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.cancelAnimationFrame(id)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [insetOpen])
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -400,7 +524,6 @@ export function App() {
       await currentViewer.loadCloud(loaded.viz, nextMeta, station)
       currentViewer.setAppearance(lookRef.current)
       currentViewer.setThickness(thicknessRef.current)
-      if (sLiveRef.current) sLiveRef.current.textContent = formatMeters(station)
       if (thickLiveRef.current) thickLiveRef.current.textContent = formatMeters(thicknessRef.current)
       paintPreview()
     } catch (err: unknown) {
@@ -505,17 +628,46 @@ export function App() {
       />
       <main className="stage">
         <canvas ref={canvasRef} className="gl" />
-        <button type="button" className="home" onClick={() => viewerRef.current?.resetCamera()}>
-          归位
-        </button>
         <ViewportHud hud={hud} />
-        {overlays.inset ? <canvas ref={insetRef} className="inset" width={220} height={220} /> : null}
+        <div className="stage-tr">
+          {overlays.inset ? (
+            <button
+              type="button"
+              className="inset-btn"
+              onClick={() => setInsetOpen(true)}
+              title="点击放大"
+              aria-label="放大断面图"
+            >
+              <canvas ref={insetRef} className="inset" width={360} height={360} />
+            </button>
+          ) : null}
+          <button type="button" className="home" onClick={() => viewerRef.current?.resetCamera()}>
+            归位
+          </button>
+        </div>
+        {insetOpen && overlays.inset ? (
+          <div
+            className="inset-lightbox"
+            onClick={() => setInsetOpen(false)}
+            role="dialog"
+            aria-modal="true"
+            aria-label="断面图"
+          >
+            <canvas
+              ref={insetLargeRef}
+              className="inset inset-large"
+              width={720}
+              height={720}
+              onClick={(event) => event.stopPropagation()}
+            />
+            <p className="inset-hint">点击空白处或按 Esc 关闭</p>
+          </div>
+        ) : null}
         {meta ? (
           <StationFilm
             key={`${meta.source_name ?? ''}-${meta.s_min}-${meta.s_max}`}
             meta={meta}
             sliderRef={sSliderRef}
-            liveRef={sLiveRef}
             onInput={onStationInput}
           />
         ) : null}
@@ -748,7 +900,7 @@ function OverlayToggles(props: {
     { key: 'slab', label: '切片点', swatch: props.look.slice },
     { key: 'contour', label: '内壁轮廓', swatch: props.look.contour },
     { key: 'fit', label: '拟合圆', swatch: props.look.fit },
-    { key: 'inset', label: '断面草图' },
+    { key: 'inset', label: '断面图' },
   ]
   return (
     <div className="checks">
@@ -832,7 +984,6 @@ function ExportPanel(props: {
 function StationFilm(props: {
   meta: Meta
   sliderRef: RefObject<HTMLInputElement | null>
-  liveRef: RefObject<HTMLSpanElement | null>
   onInput: (event: ChangeEvent<HTMLInputElement>) => void
 }) {
   const start = defaultStation(props.meta)
@@ -846,9 +997,6 @@ function StationFilm(props: {
       </div>
       <div className="film-row">
         <span className="film-label">桩号</span>
-        <span ref={props.liveRef} className="readout film-readout">
-          {formatMeters(start)}
-        </span>
       </div>
       <input
         ref={props.sliderRef}
