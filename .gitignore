@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+output/
+output_checked/
+output_checked2/
+output_v2/
+output_v3/
+*.las
+*.laz
+node_modules/
+.cursor/
