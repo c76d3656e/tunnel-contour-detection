@@ -103,6 +103,7 @@ a:focus-visible {
 }
 
 .shell {
+  position: relative;
   display: grid;
   grid-template-columns: var(--rail) minmax(0, 1fr);
   height: 100%;
@@ -163,6 +164,54 @@ a:focus-visible {
   margin: 0;
   color: var(--dust);
   font-size: 0.82rem;
+}
+
+.file-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+  opacity: 0;
+}
+
+.docket-name {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 0.92rem;
+  color: var(--paper);
+  padding: 0.35rem 0.45rem;
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
+  border-left: 3px solid var(--ember);
+}
+
+.file-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--input-bg);
+  color: var(--paper);
+  border: 1px solid var(--ember);
+  padding: 0.42rem 0.6rem;
+  cursor: pointer;
+  border-radius: 1px;
+  font-size: 0.82rem;
+}
+
+.file-btn:hover:not(:disabled) {
+  background: var(--chip);
+  color: var(--ink);
+}
+
+.file-btn:disabled,
+.file-btn.is-wait {
+  opacity: 0.55;
+  cursor: wait;
 }
 
 .block {
@@ -560,6 +609,18 @@ select,
   place-items: center;
   background: var(--curtain-bg);
   pointer-events: none;
+}
+
+.curtain.is-pick {
+  pointer-events: auto;
+}
+
+.curtain-copy {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 1rem;
 }
 
 .curtain p {

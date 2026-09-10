@@ -13,6 +13,7 @@ import {
   fetchExport,
   fetchMeta,
   pollHealth,
+  uploadCloud,
   type ExportKind,
   type Health,
   type Meta,
@@ -182,6 +183,9 @@ export function App() {
   const [health, setHealth] = useState<Health>({ status: 'loading', message: '正在连接' })
   const [error, setError] = useState<string | null>(null)
   const [meta, setMeta] = useState<Meta | null>(null)
+  const [swapBusy, setSwapBusy] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const reloadRef = useRef<() => Promise<void>>(async () => {})
   const [look, setLook] = useState<Appearance>(() => lookRef.current)
   const [method, setMethod] = useState('hampel')
   const [bins, setBins] = useState(DEFAULT_BINS)
@@ -263,37 +267,54 @@ export function App() {
     if (!canvas) return
     let cancelled = false
     let viewer: InstanceType<typeof import('./viewer/TunnelViewer').TunnelViewer> | null = null
+    let generation = 0
+
+    const reloadCloud = async () => {
+      const gen = ++generation
+      const healthNow = await pollHealth((next) => {
+        if (!cancelled && gen === generation) setHealth(next)
+      })
+      if (cancelled || gen !== generation) return
+      if (healthNow.status !== 'ready') {
+        if (!metaRef.current) setMeta(null)
+        return
+      }
+      const nextMeta = await fetchMeta()
+      if (cancelled || gen !== generation) return
+      const methodName = nextMeta.default_method || methodRef.current || 'hampel'
+      methodRef.current = methodName
+      const cloud = await fetchCloud(nextMeta.cloud_url)
+      if (cancelled || gen !== generation) return
+      const station = defaultStation(nextMeta)
+      metaRef.current = nextMeta
+      sRef.current = station
+      slicerRef.current = new LiveSlicer(cloud)
+      lastFrameRef.current = null
+      setMeta(nextMeta)
+      setMethod(methodName)
+      setExportUrls(null)
+      setError(null)
+      const currentViewer = viewerRef.current
+      if (!currentViewer) return
+      await currentViewer.loadCloud(cloud, nextMeta, station)
+      if (cancelled || gen !== generation) return
+      currentViewer.setAppearance(lookRef.current)
+      currentViewer.setThickness(thicknessRef.current)
+      if (sLiveRef.current) sLiveRef.current.textContent = formatMeters(station)
+      if (thickLiveRef.current) thickLiveRef.current.textContent = formatMeters(thicknessRef.current)
+      paintPreview()
+    }
+    reloadRef.current = () =>
+      reloadCloud().catch((err: unknown) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : '无法装入点云')
+      })
 
     ;(async () => {
       const { TunnelViewer } = await import('./viewer/TunnelViewer')
       if (cancelled) return
       viewer = new TunnelViewer(canvas)
       viewerRef.current = viewer
-      await pollHealth((next) => {
-        if (!cancelled) setHealth(next)
-      })
-      const nextMeta = await fetchMeta()
-      if (cancelled) return
-      const methodName = nextMeta.default_method || 'hampel'
-      methodRef.current = methodName
-      thicknessRef.current = DEFAULT_THICKNESS
-      binsRef.current = DEFAULT_BINS
-      smoothRef.current = DEFAULT_SMOOTH
-      const cloud = await fetchCloud()
-      if (cancelled) return
-      const station = defaultStation(nextMeta)
-      metaRef.current = nextMeta
-      sRef.current = station
-      setMeta(nextMeta)
-      setMethod(methodName)
-      slicerRef.current = new LiveSlicer(cloud)
-      await viewer.loadCloud(cloud, nextMeta, station)
-      if (cancelled) return
-      viewer.setAppearance(lookRef.current)
-      viewer.setThickness(DEFAULT_THICKNESS)
-      if (sLiveRef.current) sLiveRef.current.textContent = formatMeters(station)
-      if (thickLiveRef.current) thickLiveRef.current.textContent = formatMeters(DEFAULT_THICKNESS)
-      paintPreview()
+      await reloadCloud()
     })().catch((err: unknown) => {
       if (!cancelled) setError(err instanceof Error ? err.message : '无法装入点云')
     })
@@ -393,6 +414,27 @@ export function App() {
     schedulePaint()
   }
 
+  const onPickFile = async (file: File) => {
+    setSwapBusy(true)
+    setError(null)
+    setExportError(null)
+    setHealth({ status: 'loading', message: `正在接收 ${file.name}`, source_name: file.name })
+    try {
+      await uploadCloud(file)
+      await reloadRef.current()
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : '无法装入点云')
+    } finally {
+      setSwapBusy(false)
+    }
+  }
+
+  const onFileInput = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.currentTarget.files?.[0]
+    event.currentTarget.value = ''
+    if (file) void onPickFile(file)
+  }
+
   const onExport = async () => {
     const selected = EXPORT_OPTIONS.filter((item) => kinds[item.id]).map((item) => item.id)
     if (selected.length === 0) {
@@ -418,19 +460,34 @@ export function App() {
     }
   }
 
-  const busy = !meta && !error
+  const showCurtain = Boolean(error) || swapBusy || !meta
+  const canPick = !swapBusy && health.status !== 'loading'
+  const sourceName = meta?.source_name ?? health.source_name ?? null
   const statusText = error
     ? error
-    : meta
-      ? '点云已铺平。拖动桩号、改厚度、换算法都在浏览器里即时计算。'
-      : health.status === 'loading'
-        ? `正在准备：${health.message}`
+    : swapBusy || health.status === 'loading'
+      ? `正在准备：${health.message}`
+      : health.status === 'idle'
+        ? '打开一卷 LAS 或 LAZ 点云。'
         : health.message
 
   return (
     <div className="shell">
+      <input
+        id="las-file"
+        ref={fileInputRef}
+        className="file-input"
+        type="file"
+        accept=".las,.laz"
+        disabled={swapBusy}
+        aria-hidden="true"
+        tabIndex={-1}
+        onChange={onFileInput}
+      />
       <InstrumentRail
         meta={meta}
+        sourceName={sourceName}
+        uploading={swapBusy}
         look={look}
         method={method}
         bins={bins}
@@ -453,6 +510,7 @@ export function App() {
         onOverlays={setOverlays}
         onKinds={setKinds}
         onExport={onExport}
+        onOpenPicker={() => fileInputRef.current?.click()}
       />
       <main className="stage">
         <canvas ref={canvasRef} className="gl" />
@@ -463,15 +521,27 @@ export function App() {
         {overlays.inset ? <canvas ref={insetRef} className="inset" width={220} height={220} /> : null}
         {meta ? (
           <StationFilm
+            key={`${meta.source_name ?? ''}-${meta.s_min}-${meta.s_max}`}
             meta={meta}
             sliderRef={sSliderRef}
             liveRef={sLiveRef}
             onInput={onStationInput}
           />
         ) : null}
-        {busy || error ? (
-          <div className={`curtain${error ? ' is-error' : ''}`}>
-            <p>{statusText}</p>
+        {showCurtain ? (
+          <div className={`curtain${error ? ' is-error' : ''}${canPick ? ' is-pick' : ''}`}>
+            <div className="curtain-copy">
+              <p>{statusText}</p>
+              {canPick ? (
+                <button
+                  type="button"
+                  className="file-btn"
+                  onClick={() => fileInputRef.current?.click()}
+                >
+                  打开 LAS / LAZ
+                </button>
+              ) : null}
+            </div>
           </div>
         ) : null}
       </main>
@@ -481,6 +551,8 @@ export function App() {
 
 function InstrumentRail(props: {
   meta: Meta | null
+  sourceName: string | null
+  uploading: boolean
   look: Appearance
   method: string
   bins: number
@@ -503,6 +575,7 @@ function InstrumentRail(props: {
   onOverlays: Dispatch<SetStateAction<OverlayState>>
   onKinds: Dispatch<SetStateAction<Record<ExportKind, boolean>>>
   onExport: () => void
+  onOpenPicker: () => void
 }) {
   const methods = props.meta?.methods ?? ['hampel']
   return (
@@ -512,12 +585,27 @@ function InstrumentRail(props: {
         <h1>沿桩号切开隧道，检查内轮廓。</h1>
         {props.meta ? (
           <p className="census">
+            {props.sourceName ? `${props.sourceName} · ` : ''}
             全云 {props.meta.point_count.toLocaleString()} 点，屏幕上画 {props.meta.viz_count.toLocaleString()} 点
           </p>
         ) : (
           <p className="census">等待点云铺进视野</p>
         )}
       </header>
+
+      <section className="block">
+        <p className="block-title">点云卷</p>
+        <p className="docket-name">{props.sourceName ?? '还没有装入'}</p>
+        <button
+          type="button"
+          className={`file-btn${props.uploading ? ' is-wait' : ''}`}
+          disabled={props.uploading}
+          onClick={props.onOpenPicker}
+        >
+          {props.uploading ? '正在读入…' : props.sourceName ? '换一卷 LAS / LAZ' : '打开 LAS / LAZ'}
+        </button>
+        <p className="hint">换卷后按新文件估计轴线，不会沿用上一卷的姿态。</p>
+      </section>
 
       <section className="block">
         <p className="block-title">主题</p>
@@ -648,6 +736,7 @@ function InstrumentRail(props: {
       <ExportPanel
         kinds={props.kinds}
         exporting={props.exporting}
+        disabled={props.uploading || !props.meta}
         exportError={props.exportError}
         exportUrls={props.exportUrls}
         onKinds={props.onKinds}
@@ -691,6 +780,7 @@ function OverlayToggles(props: {
 function ExportPanel(props: {
   kinds: Record<ExportKind, boolean>
   exporting: boolean
+  disabled: boolean
   exportError: string | null
   exportUrls: Partial<Record<ExportKind, string>> | null
   onKinds: Dispatch<SetStateAction<Record<ExportKind, boolean>>>
@@ -714,7 +804,12 @@ function ExportPanel(props: {
           </label>
         ))}
       </div>
-      <button type="button" className="export-btn" onClick={props.onExport} disabled={props.exporting}>
+      <button
+        type="button"
+        className="export-btn"
+        onClick={props.onExport}
+        disabled={props.exporting || props.disabled}
+      >
         {props.exporting ? '正在出图…' : '导出当前剖面'}
       </button>
       {props.exportError ? <p className="fail">{props.exportError}</p> : null}

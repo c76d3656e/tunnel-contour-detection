@@ -169,11 +169,15 @@ def render_tunnel_3d(manifest: Path, section_id: int, output: Path | None = None
 
 
 @app.command()
-def view(input: Path, output: Path = Path("output"), host: str = "127.0.0.1",
+def view(input: Path | None = typer.Argument(None, help="LAS/LAZ to open first; omit to pick a file in the browser"),
+         output: Path = Path("output"), host: str = "127.0.0.1",
          port: int = 8765, viz_points: int = 300000, open_browser: bool = True):
     """Serve the interactive 3D viewer. The tunnel is laid flat with invert down."""
     if viz_points < 20000:
         raise typer.BadParameter("viz_points must be at least 20000")
+    if input is not None and not input.exists():
+        raise typer.BadParameter(f"file not found: {input}")
     from .server import run_server
-    typer.echo(f"viewer http://{host}:{port}  (LAS={input})")
+    label = str(input) if input is not None else "browser upload"
+    typer.echo(f"viewer http://{host}:{port}  (LAS={label})")
     run_server(input, output, host, port, open_browser, viz_points)

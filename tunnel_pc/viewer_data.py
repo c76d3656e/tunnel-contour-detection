@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime
@@ -52,22 +53,43 @@ def _cache_dir(output: Path) -> Path:
     return path
 
 
-def _load_axis(output: Path, points: np.ndarray):
+def _model_dir(output: Path, las_path: Path) -> Path:
+    key = hashlib.sha1(str(las_path.resolve()).encode("utf-8")).hexdigest()[:16]
+    path = _cache_dir(output) / "models" / key
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def cloud_bin_path(cache: ViewerCache) -> Path:
+    return _model_dir(cache.output, cache.las_path) / CLOUD_NAME
+
+
+def _same_las(left: Path, right: Path) -> bool:
+    try:
+        return left.resolve() == right.resolve()
+    except OSError:
+        return False
+
+
+def _load_axis(output: Path, points: np.ndarray, las_path: Path):
     manifest_path = output / "profile_manifest.json"
     if manifest_path.exists():
         data = json.loads(manifest_path.read_text(encoding="utf-8"))
-        origin = np.asarray(data["axis"]["origin"], dtype=np.float64)
-        axis = np.asarray(data["axis"]["direction"], dtype=np.float64)
-        u_axis = np.asarray(data["axis"]["u"], dtype=np.float64)
-        v_axis = np.asarray(data["axis"]["v_up"], dtype=np.float64)
-        return origin, axis / np.linalg.norm(axis), u_axis, v_axis
+        source = data.get("source_file")
+        if source and _same_las(Path(source), las_path):
+            origin = np.asarray(data["axis"]["origin"], dtype=np.float64)
+            axis = np.asarray(data["axis"]["direction"], dtype=np.float64)
+            u_axis = np.asarray(data["axis"]["u"], dtype=np.float64)
+            v_axis = np.asarray(data["axis"]["v_up"], dtype=np.float64)
+            return origin, axis / np.linalg.norm(axis), u_axis, v_axis
     origin, axis = principal_axis(points)
     u_axis, v_axis = frame(axis)
     return origin, axis, u_axis, v_axis
 
 
 def build_cache(las_path: Path, output: Path, viz_points: int = 300000) -> ViewerCache:
-    cache = _cache_dir(output)
+    las_path = las_path.resolve()
+    cache = _model_dir(output, las_path)
     las_mtime = las_path.stat().st_mtime
     meta_path = cache / META_NAME
     xyz_path = cache / XYZ_NAME
@@ -94,7 +116,7 @@ def build_cache(las_path: Path, output: Path, viz_points: int = 300000) -> Viewe
             )
 
     points = read_las(las_path)
-    origin, axis, u_axis, v_axis = _load_axis(output, points)
+    origin, axis, u_axis, v_axis = _load_axis(output, points, las_path)
     s = ((points - origin) @ axis).astype(np.float32)
     order = np.argsort(s, kind="mergesort")
     xyz = np.ascontiguousarray(points[order], dtype=np.float32)
@@ -119,7 +141,8 @@ def build_cache(las_path: Path, output: Path, viz_points: int = 300000) -> Viewe
     v = all_delta @ v_axis
     uv_extent = float(max(np.percentile(np.abs(u), 99.5), np.percentile(np.abs(v), 99.5), 1.5) * 2.4)
     meta = {
-        "las_path": str(las_path), "las_mtime": las_mtime, "viz_points": viz_points,
+        "las_path": str(las_path), "source_name": las_path.name,
+        "las_mtime": las_mtime, "viz_points": viz_points,
         "display_frame": DISPLAY_FRAME,
         "point_count": int(len(xyz)), "viz_count": int(len(viz)),
         "origin": origin.tolist(), "axis": axis.tolist(), "u": u_axis.tolist(), "v_up": v_axis.tolist(),
@@ -144,6 +167,7 @@ def build_cache(las_path: Path, output: Path, viz_points: int = 300000) -> Viewe
 
 
 def public_meta(cache: ViewerCache) -> dict:
+    mtime = int(cache.las_path.stat().st_mtime) if cache.las_path.exists() else 0
     return {
         "point_count": int(cache.xyz.shape[0]),
         "viz_count": cache.viz_count,
@@ -159,7 +183,8 @@ def public_meta(cache: ViewerCache) -> dict:
         "methods": list(METHODS),
         "default_method": DEFAULT_METHOD,
         "display_frame": DISPLAY_FRAME,
-        "cloud_url": "/api/cloud.bin",
+        "source_name": cache.las_path.name,
+        "cloud_url": f"/api/cloud.bin?v={mtime}",
         "axes": {
             "x": "u, horizontal across the tunnel",
             "y": "v_up, gravity-aligned up; invert/floor is negative Y",

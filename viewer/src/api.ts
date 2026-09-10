@@ -1,8 +1,9 @@
-export type HealthStatus = 'loading' | 'ready' | 'error'
+export type HealthStatus = 'loading' | 'ready' | 'error' | 'idle'
 
 export interface Health {
   status: HealthStatus
   message: string
+  source_name?: string | null
 }
 
 export interface Meta {
@@ -21,6 +22,7 @@ export interface Meta {
   u: number[]
   v_up: number[]
   cloud_url: string
+  source_name?: string
   axes: { x: string; y: string; z: string }
 }
 
@@ -86,8 +88,8 @@ export async function fetchMeta(): Promise<Meta> {
   return readJson<Meta>(await fetch('/api/meta'))
 }
 
-export async function fetchCloud(): Promise<Float32Array> {
-  const response = await fetch('/api/cloud.bin')
+export async function fetchCloud(url = '/api/cloud.bin'): Promise<Float32Array> {
+  const response = await fetch(url, { cache: 'no-store' })
   if (!response.ok) {
     throw new Error('点云二进制读取失败')
   }
@@ -113,11 +115,18 @@ export async function fetchExport(params: SliceParams & { kinds: ExportKind[] })
   return readJson<ExportResult>(response)
 }
 
-export async function pollHealth(onTick: (health: Health) => void): Promise<void> {
+export async function uploadCloud(file: File): Promise<Health> {
+  const body = new FormData()
+  body.append('file', file)
+  const response = await fetch('/api/open', { method: 'POST', body })
+  return readJson<Health>(response)
+}
+
+export async function pollHealth(onTick: (health: Health) => void): Promise<Health> {
   for (;;) {
     const health = await fetchHealth()
     onTick(health)
-    if (health.status === 'ready') return
+    if (health.status === 'ready' || health.status === 'idle') return health
     if (health.status === 'error') {
       throw new Error(health.message || '点云准备失败')
     }
